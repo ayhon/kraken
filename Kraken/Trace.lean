@@ -39,6 +39,8 @@ variable (eff :  Effect) (Result : Type _) in
 inductive Trace where
   | done (res : Result)
   | yield (value : eff.In) (cont : eff.Out value → Trace)
+-- NOTE: With this encoding, we represent failed states as effects with empty output types.
+-- We could choose to represent them explicitly with a separate constructor instead.s
 
 namespace Trace
 variable {eff :  Effect} {Result : Type _}
