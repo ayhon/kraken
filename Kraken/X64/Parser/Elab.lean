@@ -4,20 +4,21 @@ public import Kraken.X64.Parser.Basic
 public meta import Kraken.X64.Parser.Basic
 public import Kraken.X64.Parser.Syntax
 public meta import Kraken.X64.Parser.Syntax
+public import Qq
+public meta import Qq
 public meta import Lean
 
 /-!
 Operands may contain antiquotations (`%❰t❱`), whose value is only known as a term, so everything from
-operands upwards is elaborated to `Expr`s. The widths of an instruction are kept in the `X64ElabM` state
-rather than threaded through the operand elaborators: a register reports its width, which must agree with
-what the mnemonic suffix and the other operands determined; immediates and memory operands are valid at any
-width and simply use the instruction's.
+operands upwards is elaborated to `Qq` quoted expressions (`Q(...)`). The widths of an instruction are kept
+in the `X64ElabM` state rather than threaded through the operand elaborators: a register reports its width,
+which must agree with what the mnemonic suffix and the other operands determined; immediates and memory
+operands are valid at any width and simply use the instruction's.
 -/
 
 namespace Kraken.X64.Parser
 
-open Lean Meta Elab Kraken.Parser
-open Term hiding mkConst  -- `mkConst` is the pure `Lean.mkConst`, not the environment lookup `Term.mkConst`
+open Lean Meta Elab Term Qq Kraken.Parser
 
 public meta section
 
@@ -26,20 +27,23 @@ public meta section
 -- ============================================================================
 
 structure X64ElabM.State where
-  /-- The operation width of the instruction (or operand scope) being elaborated: a metavariable until
-      the mnemonic suffix or an operand determines it. -/
-  operandWidth : Expr
+  /-- The general-purpose operation width of the instruction (or operand scope) being elaborated:
+      a metavariable until the mnemonic suffix or an operand determines it. -/
+  operandWidth : Q(Width)
+  /-- The AVX vector operation width of the instruction being elaborated: a metavariable until
+      an operand determines it. -/
+  avxOperandWidth : Q(AvxWidth)
   /-- The address width of the instruction's memory operand, if any. -/
-  addressWidth? : Option Expr := none
+  addressWidth? : Option Q(Width) := none
 
 abbrev X64ElabM := StateRefT X64ElabM.State TermElabM
 
-/-- A metavariable for an operation width (`Width` or `AvxWidth`, decided by the first unification). -/
-private def mkFreshWidth : MetaM Expr := mkFreshExprMVar none
-
-/-- Run the elaboration of an instruction, whose operation width is yet to be determined. -/
+/-- Run the elaboration of an instruction, whose operation widths are yet to be determined. -/
 def X64ElabM.run {α : Type} (x : X64ElabM α) : TermElabM α := do
-  x.run' { operandWidth := ← mkFreshWidth }
+  x.run' {
+    operandWidth := ← mkFreshExprMVarQ q(Width)
+    avxOperandWidth := ← mkFreshExprMVarQ q(AvxWidth)
+  }
 
 def ppWidth (wExpr : Expr) : MetaM MessageData := do
   let wExpr ← instantiateMVars wExpr  -- an assigned metavariable is not syntactically `Width.W64`
@@ -47,51 +51,59 @@ def ppWidth (wExpr : Expr) : MetaM MessageData := do
   if let some wValue := [AvxWidth.W128, .W256, .W512].find? (toExpr · == wExpr) then return m!"{wValue}"
   return m!"{wExpr}"
 
-/-- The operation width of the current instruction. -/
-def getOperandWidth : X64ElabM Expr :=
+/-- The general-purpose operation width of the current instruction. -/
+def getOperandWidth : X64ElabM Q(Width) :=
   return (← get).operandWidth
+
+/-- The AVX vector operation width of the current instruction. -/
+def getAvxOperandWidth : X64ElabM Q(AvxWidth) :=
+  return (← get).avxOperandWidth
+
+/-- Assert that two width expressions are definitionally equal, returning their `=Q` proof. -/
+def assertWidthEq {α : Q(Type)} (w' w : Q($α)) : MetaM (PLift ($w' =Q $w)) := do
+  match ← isDefEqQ (u := 1) w' w with
+  | .defEq h => return ⟨h⟩
+  | .notDefEq => throwError "type error: {← ppWidth w'} != {← ppWidth w}"
 
 /-- Record that the current operand has width `w`, which must agree with the width already determined by
     the mnemonic suffix or the previous operands. -/
-def setOperandWidth (w : Expr) : X64ElabM Unit := do
-  let w' ← getOperandWidth
-  unless ← isDefEq w' w do throwError "type error: {← ppWidth w'} != {← ppWidth w}"
-
-/-- Apply `f`, whose first argument is a width (a constructor `c {w} ...` or a type `T w`), to the
-    instruction's operation width and to `args`. -/
-def mkAppWidth (f : Expr) (args : Array Expr := #[]) : X64ElabM Expr :=
-  return mkAppN f (#[← getOperandWidth] ++ args)
+def setOperandWidth (w : Q(Width)) : X64ElabM Unit := do
+  discard <| assertWidthEq (← getOperandWidth) w
 
 /-- Run `body` with its own operation width, initially `w?`, and return the width it determined. -/
-private def withOperandWidth {α : Type} (w? : Option Width) (body : X64ElabM α) : X64ElabM (α × Expr) := do
+private def withOperandWidth {α : Q(Width) → Type} (w? : Option Width)
+    (body : (w : Q(Width)) → X64ElabM (α w)) : X64ElabM ((w : Q(Width)) × α w) := do
   let saved ← getOperandWidth
-  let w ← match w? with
-    | some w => pure (toExpr w)
-    | none => mkFreshWidth
+  let w : Q(Width) ← match w? with
+    | some w => pure q($w)
+    | none => mkFreshExprMVarQ q(Width)
   modify ({ · with operandWidth := w })
   try
-    let res ← body
-    pure (res, ← instantiateMVars w)
+    let res ← body w
+    pure ⟨w, res⟩
   finally
     modify ({ · with operandWidth := saved })
 
 /-- Elaborate a memory operand: the widths its registers report make up the address width of the
     instruction, not its operation width. x86 instructions take at most one memory operand. -/
 def computingAddrWidth {α : Type} (body : X64ElabM α) : X64ElabM α := do
-  let (res, w) ← withOperandWidth none body
+  let ⟨w, res⟩ ← withOperandWidth none fun _ => body
   if (← get).addressWidth?.isSome then throwError "can't have two memory operands"
+  let w ← instantiateMVars w
   modify ({ · with addressWidth? := some w })
   pure res
 
 /-- Elaborate the source operand of an unsuffixed widening move (`movsx`/`movzx`) in its own operation
     width, which must be narrower than the instruction's; checked once both are known. Returns the
     source width. -/
-def withFreshOperandWidthUnderCurrent {α : Type} (body : X64ElabM α) : X64ElabM (α × Expr) := do
-  let (res, wSrc) ← withOperandWidth none body
+def withFreshOperandWidthUnderCurrent {α : Q(Width) → Type}
+    (body : (w : Q(Width)) → X64ElabM (α w)) : X64ElabM ((w : Q(Width)) × α w) := do
+  let ⟨wSrc, res⟩ ← withOperandWidth none body
   checkUnder wSrc
-  pure (res, wSrc)
+  pure ⟨wSrc, res⟩
 where
-  checkUnder (wSrc) : X64ElabM Unit := do
+  checkUnder (wSrc : Q(Width)) : X64ElabM Unit := do
+    let wSrc ← instantiateMVars wSrc
     let wDst ← instantiateMVars (← getOperandWidth)
     let value? (w : Expr) := [Width.W8, .W16, .W32, .W64].find? (toExpr · == w)
     if let (some s, some d) := (value? wSrc, value? wDst) then
@@ -99,20 +111,20 @@ where
 
 /-- Build `Instr.regular` from the instruction's widths and its operation `op`. The operation width must
     have been determined, unless `ifUndetermined` provides it (`push`/`pop` default to 64 bits). -/
-def mkRegularInstr (op : Expr) (ifUndetermined : Option Width := none) : X64ElabM Expr := do
-  let w ← instantiateMVars (← getOperandWidth)
-  if w.isMVar then
-    let d ← ifUndetermined.getDM <| throwError "could not infer operand width"
-    w.mvarId!.assign (toExpr d)
-  let aw := (← get).addressWidth?.getD (toExpr Width.W64)
-  instantiateMVars (mkApp3 (mkConst ``Instr.regular) aw w op)
+def mkRegularInstr (w : Q(Width)) (op : Q(Operation $w)) (ifUndetermined : Option Width := none) : X64ElabM Q(Instr) := do
+  let w' ← instantiateMVars w
+  if w'.isMVar then
+    let d : Width ← ifUndetermined.getDM <| throwError "could not infer operand width"
+    w'.mvarId!.assign q($d)
+  let aw := (← get).addressWidth?.getD q(.W64)
+  instantiateMVars q(Instr.regular $aw $w $op)
 
 /-- Build `Instr.avx` from the instruction's widths and its AVX operation `op`. -/
-def mkAvxInstr (op : Expr) : X64ElabM Expr := do
-  let w ← instantiateMVars (← getOperandWidth)
-  if w.isMVar then throwError "could not infer operand width"
-  let aw := (← get).addressWidth?.getD (toExpr Width.W64)
-  instantiateMVars (mkApp3 (mkConst ``Instr.avx) aw w op)
+def mkAvxInstr (w : Q(AvxWidth)) (op : Q(AvxOperation $w)) : X64ElabM Q(Instr) := do
+  let w' ← instantiateMVars w
+  if w'.isMVar then throwError "could not infer operand width"
+  let aw := (← get).addressWidth?.getD q(.W64)
+  instantiateMVars q(Instr.avx $aw $w $op)
 
 /-- Elaborate the term `t` of an antiquotation at the type `ty` expected by its position. Elaboration is
     forced to finish here (`withSynthesize`) because the instruction inspects the result right away: the
@@ -120,8 +132,8 @@ def mkAvxInstr (op : Expr) : X64ElabM Expr := do
     rejects a width that is still a metavariable. A postponed `t` would leave a placeholder of type `ty`
     behind, with the width undetermined. A type mismatch aborts the instruction instead of being recovered
     as `sorry`. -/
-def elabAntiquot (t : Term) (ty : Expr) : TermElabM Expr :=
-  withoutErrToSorry <| withSynthesize <| elabTermEnsuringType t ty
+def elabAntiquot {ty : Q(Type)} (t : Term) : TermElabM Q($ty) :=
+  withoutErrToSorry <| withSynthesize <| elabTermEnsuringTypeQ t ty
 
 -- ============================================================================
 -- Constant Expression Evaluation
@@ -216,16 +228,16 @@ def evalReg (stx : TSyntax `x64_reg) : TermElabM ((w : Width) × Reg w) := withR
     pure ⟨.W8, .low reg .W8⟩
   | _, _ => throwError "expected general-purpose register"
 
-/-- Elaborate an `x64_reg` into an `Expr` of type `Reg w`, where `w` is the operation width of the
+/-- Elaborate an `x64_reg` into a `Q(Reg $w)`, where `w` is the operation width of the
     instruction: a concrete register determines it, an antiquotation `%❰t❱` is elaborated at it. -/
-def elabReg (stx : TSyntax `x64_reg) : X64ElabM Expr := withRef stx do
+def elabReg {w : Q(Width)} (stx : TSyntax `x64_reg) : X64ElabM Q(Reg $w) := withRef stx do
   match stx with
   | `(x64_reg| %❰ $t ❱) =>
-    elabAntiquot t (mkApp (mkConst ``Reg) (← getOperandWidth))
+    elabAntiquot t
   | _ =>
-    let ⟨w, reg⟩ ← evalReg stx
-    setOperandWidth (toExpr w)
-    pure (toExpr reg)
+    let ⟨w', reg⟩ ← evalReg stx
+    let ⟨_⟩ ← assertWidthEq w q($w')
+    pure q($reg)
 
 /-- Evaluate an `x64_avx_reg` syntax node into an AVX vector register and its width. -/
 def evalAvxReg (stx : TSyntax `x64_avx_reg) : TermElabM ((w : AvxWidth) × AvxReg w) := withRef stx do
@@ -248,16 +260,16 @@ def evalAvxReg (stx : TSyntax `x64_avx_reg) : TermElabM ((w : AvxWidth) × AvxRe
   | "zmm" => pure ⟨.W512, .zmm mm⟩
   | _     => throwError "invalid AVX register prefix '{stem}'"
 
-/-- Elaborate an `x64_avx_reg` into an `Expr` of type `AvxReg w`, where `w` is the operation width of the
+/-- Elaborate an `x64_avx_reg` into a `Q(AvxReg $w)`, where `w` is the AVX operation width of the
     instruction. -/
-def elabAvxReg (stx : TSyntax `x64_avx_reg) : X64ElabM Expr := withRef stx do
+def elabAvxReg {w : Q(AvxWidth)} (stx : TSyntax `x64_avx_reg) : X64ElabM Q(AvxReg $w) := withRef stx do
   match stx with
   | `(x64_avx_reg| %❰ $t ❱) =>
-    elabAntiquot t (mkApp (mkConst ``AvxReg) (← getOperandWidth))
+    elabAntiquot t
   | _ =>
-    let ⟨w, reg⟩ ← evalAvxReg stx
-    setOperandWidth (toExpr w)
-    pure (toExpr reg)
+    let ⟨w', reg⟩ ← evalAvxReg stx
+    let ⟨_⟩ ← assertWidthEq w q($w')
+    pure q($reg)
 
 /-- Evaluate a low register for memory addressing (rejecting `%ah`/`%bh`/`%ch`/`%dh`). -/
 def evalLowReg (stx : TSyntax `x64_reg) : TermElabM (Width × Reg64) := withRef stx do
@@ -266,28 +278,28 @@ def evalLowReg (stx : TSyntax `x64_reg) : TermElabM (Width × Reg64) := withRef 
   | .low r64 _ => pure (w, r64)
   | _ => throwError "high byte register cannot be used for an addrexpr"
 
-/-- Elaborate a low register for memory addressing into an `Expr` of type `Reg64`, reporting its width
+/-- Elaborate a low register for memory addressing into a `Q(Reg64)`, reporting its width
     (the address width, see `computingAddrWidth`); an antiquotation `%❰t❱` is elaborated at `Reg64` and
     denotes a 64-bit address. -/
-def elabLowReg (stx : TSyntax `x64_reg) : X64ElabM Expr := withRef stx do
+def elabLowReg (stx : TSyntax `x64_reg) : X64ElabM Q(Reg64) := withRef stx do
   match stx with
   | `(x64_reg| %❰ $t ❱) =>
-    setOperandWidth (toExpr Width.W64)
-    elabAntiquot t (mkConst ``Reg64)
+    setOperandWidth q(.W64)
+    elabAntiquot t
   | _ =>
     let (w, r) ← evalLowReg stx
-    setOperandWidth (toExpr w)
-    pure (toExpr r)
+    setOperandWidth q($w)
+    pure q($r)
 
-/-- Elaborate a base register for memory addressing (`%rip` or a low GPR) into an `Expr` of type
-    `RegOrRip`. -/
-def elabRegOrRip (stx : TSyntax `x64_reg_or_rip) : X64ElabM Expr := withRef stx do
+/-- Elaborate a base register for memory addressing (`%rip` or a low GPR) into a `Q(RegOrRip)`. -/
+def elabRegOrRip (stx : TSyntax `x64_reg_or_rip) : X64ElabM Q(RegOrRip) := withRef stx do
   match stx with
   | `(x64_reg_or_rip| %rip) =>
-    setOperandWidth (toExpr Width.W64)
-    pure (toExpr RegOrRip.rip)
+    setOperandWidth q(.W64)
+    pure q(.rip)
   | `(x64_reg_or_rip| $r:x64_reg) =>
-    return mkApp (mkConst ``RegOrRip.reg) (← elabLowReg r)
+    let r ← elabLowReg r
+    return q(.reg $r)
   | _ => throwError "expected memory base register"
 
 -- ============================================================================
@@ -303,36 +315,31 @@ def evalScale (stx : TSyntax `num) : X64ElabM Width := withRef stx do
   | 8 => pure .W64
   | s => throwError "invalid scale {s}, must be 1, 2, 4, or 8"
 
-/-- Elaborate an `x64_mem` syntax node into an `Expr` of type `AddrExpr`, recording the instruction's
+/-- Elaborate an `x64_mem` syntax node into a `Q(AddrExpr)`, recording the instruction's
     address width. -/
-def elabMem (stx : TSyntax `x64_mem) : X64ElabM Expr := withRef stx <| computingAddrWidth do
+def elabMem (stx : TSyntax `x64_mem) : X64ElabM Q(AddrExpr) := withRef stx <| computingAddrWidth do
   match stx with
   | `(x64_mem| $[$disp?:x64_const]?($baseStx:x64_reg_or_rip $[, $idxStx?:x64_reg $[, $scStx??:num]?]?)) =>
     let base ← elabRegOrRip baseStx
-    let disp ← match disp? with
+    let disp : ConstExpr ← match disp? with
       | some disp =>
         let disp ← evalConstExpr disp
         if base.isConstOf ``RegOrRip.rip && ! disp matches .int64 _ then
           pure <| .sub disp .after_current_instruction
         else pure disp
       | none => pure <| .int64 0
-    let scale ← (evalScale <$> scStx??.join).getD (pure .W8)
-    let idx? ← idxStx?.mapM fun idx => do
+    let scale : Width ← (evalScale <$> scStx??.join).getD (pure .W8)
+    let idx? : Q(Option AddrIndex) ← match idxStx? with
+      | some idx =>
         let idx ← elabLowReg idx
-        pure (mkApp2 (mkConst ``AddrIndex.mk) idx (toExpr scale))
-    mkAddrExpr disp (some base) idx?
+        pure q(some ⟨$idx, $scale⟩)
+      | none => pure q(none)
+    return q({ base := some $base, idx := $idx?, disp := $disp })
   | `(x64_mem| $disp:x64_const) =>
-    setOperandWidth (toExpr Width.W64)
-    let d ← evalConstExpr disp
-    mkAddrExpr d
+    setOperandWidth q(.W64)
+    let d : ConstExpr ← evalConstExpr disp
+    return q({ base := none, idx := none, disp := $d })
   | _ => throwError "invalid memory operand"
-where
-  /-- `AddrExpr.mk base? idx? disp`, with `base? : Option RegOrRip` and `idx? : Option AddrIndex`. -/
-  mkAddrExpr (disp : ConstExpr) (base? : Option Expr := none) (idx? : Option Expr := none) : Id Expr :=
-    let optionify (ty : Name) : Option Expr → Expr
-      | some e => mkApp2 (Lean.mkConst ``Option.some [0]) (Lean.mkConst ty) e
-      | none => mkApp (Lean.mkConst ``Option.none [0]) (Lean.mkConst ty)
-    return mkApp3 (Lean.mkConst ``AddrExpr.mk) (optionify ``RegOrRip base?) (optionify ``AddrIndex idx?) (toExpr disp)
 
 /-- Extract the symbol name of a `$sym` immediate, which Lean parses as an antiquotation node. -/
 def getAntiquotSym (stx : Syntax) : TermElabM String := withRef stx do
@@ -341,65 +348,78 @@ def getAntiquotSym (stx : Syntax) : TermElabM String := withRef stx do
   if name.isAnonymous then throwError "invalid operand"
   pure name.toString
 
-/-- Elaborate an `x64_reg_or_mem` into an `Expr` of type `RegOrMem w`. -/
-def elabRegOrMem (stx : TSyntax `x64_reg_or_mem) : X64ElabM Expr := withRef stx do
+/-- Elaborate an `x64_reg_or_mem` into a `Q(RegOrMem $w)`. -/
+def elabRegOrMem {w : Q(Width)} (stx : TSyntax `x64_reg_or_mem) : X64ElabM Q(RegOrMem $w) := withRef stx do
   match stx with
-  | `(x64_reg_or_mem| $r:x64_reg) => mkAppWidth (mkConst ``RegOrMem.reg) #[← elabReg r]
-  | `(x64_reg_or_mem| $m:x64_mem) => mkAppWidth (mkConst ``RegOrMem.mem) #[← elabMem m]
+  | `(x64_reg_or_mem| $r:x64_reg) =>
+    let r ← elabReg r
+    return q(.reg $r)
+  | `(x64_reg_or_mem| $m:x64_mem) =>
+    let m ← elabMem m
+    return q(.mem $m)
   | _ => throwError "expected register or memory operand"
 
-/-- Elaborate an `x64_operand` in a position that admits no immediate (a destination) into an `Expr` of
-    type `RegOrMem w`. -/
-def elabRegOrMemOperand (stx : TSyntax `x64_operand) : X64ElabM Expr := withRef stx do
+/-- Elaborate an `x64_operand` in a position that admits no immediate (a destination) into a
+    `Q(RegOrMem $w)`. -/
+def elabRegOrMemOperand {w : Q(Width)} (stx : TSyntax `x64_operand) : X64ElabM Q(RegOrMem $w) := withRef stx do
   match stx with
   | `(x64_operand| $rm:x64_reg_or_mem) => elabRegOrMem rm
-  | `(x64_operand| ❰ $t ❱) => elabAntiquot t (← mkAppWidth (mkConst ``RegOrMem))
+  | `(x64_operand| ❰ $t ❱) => elabAntiquot t
   | _ => throwError "expected register or memory operand, got $"
 
-/-- Elaborate an `x64_operand` into an `Expr` of type `Operand w`. -/
-def elabOperand (stx : TSyntax `x64_operand) : X64ElabM Expr := withRef stx do
-  let imm (ce : ConstExpr) : X64ElabM Expr := mkAppWidth (mkConst ``Operand.imm) #[toExpr ce]
+/-- Elaborate an `x64_operand` into a `Q(Operand $w)`. -/
+def elabOperand {w : Q(Width)} (stx : TSyntax `x64_operand) : X64ElabM Q(Operand $w) := withRef stx do
   if stx.raw.isAntiquot then
-    imm (.label (← getAntiquotSym stx.raw))
+    let sym : String ← getAntiquotSym stx.raw
+    return q(.imm (.label $sym))
   else match stx with
-  | `(x64_operand| $rm:x64_reg_or_mem) => mkAppWidth (mkConst ``Operand.regOrMem) #[← elabRegOrMem rm]
-  | `(x64_operand| $i:x64_imm) => imm (← evalConstExpr (← getImmConst i))
-  | `(x64_operand| ❰ $t ❱) => elabAntiquot t (← mkAppWidth (mkConst ``Operand))
+  | `(x64_operand| $rm:x64_reg_or_mem) =>
+    let rm ← elabRegOrMem rm
+    return q(.regOrMem $rm)
+  | `(x64_operand| $i:x64_imm) =>
+    let ce : ConstExpr ← evalConstExpr (← getImmConst i)
+    return q(.imm $ce)
+  | `(x64_operand| ❰ $t ❱) => elabAntiquot t
   -- `$sym ± n`: the left operand is the `$sym` antiquotation node (see the grammar).
   | `(x64_operand| $sym:x64_operand + $n:num) =>
-    let s ← getAntiquotSym sym.raw
-    let i ← withRef n <| Int64.ofNatNoOverflow n.getNat
-    imm (.add (.label s) (.int64 i))
+    let s : String ← getAntiquotSym sym.raw
+    let i : Int64 ← withRef n <| Int64.ofNatNoOverflow n.getNat
+    return q(.imm (.add (.label $s) (.int64 $i)))
   | `(x64_operand| $sym:x64_operand - $n:num) =>
-    let s ← getAntiquotSym sym.raw
-    let i ← withRef n <| Int64.ofNatNoOverflow n.getNat
-    imm (.sub (.label s) (.int64 i))
+    let s : String ← getAntiquotSym sym.raw
+    let i : Int64 ← withRef n <| Int64.ofNatNoOverflow n.getNat
+    return q(.imm (.sub (.label $s) (.int64 $i)))
   | _ => throwError "invalid operand"
 
-/-- Elaborate an `x64_avx_operand` into an `Expr` of type `AvxRegOrMem w`. -/
-def elabAvxRegOrMem (stx : TSyntax `x64_avx_operand) : X64ElabM Expr := withRef stx do
+/-- Elaborate an `x64_avx_operand` into a `Q(AvxRegOrMem $w)`. -/
+def elabAvxRegOrMem {w : Q(AvxWidth)} (stx : TSyntax `x64_avx_operand) : X64ElabM Q(AvxRegOrMem $w) := withRef stx do
   match stx with
-  | `(x64_avx_operand| $r:x64_avx_reg) => mkAppWidth (mkConst ``AvxRegOrMem.avx) #[← elabAvxReg r]
-  | `(x64_avx_operand| $m:x64_mem) => mkAppWidth (mkConst ``AvxRegOrMem.mem) #[← elabMem m]
-  | `(x64_avx_operand| ❰ $t ❱) => elabAntiquot t (← mkAppWidth (mkConst ``AvxRegOrMem))
+  | `(x64_avx_operand| $r:x64_avx_reg) =>
+    let r ← elabAvxReg r
+    return q(.avx $r)
+  | `(x64_avx_operand| $m:x64_mem) =>
+    let m ← elabMem m
+    return q(.mem $m)
+  | `(x64_avx_operand| ❰ $t ❱) => elabAntiquot t
   | _ => throwError "expected AVX register or memory operand"
 
 /-- Elaborate a relative branch target (`RelRegOrMem`) from an `x64_operand`. -/
-def elabRelTarget (stx : TSyntax `x64_operand) : X64ElabM Expr := withRef stx do
+def elabRelTarget (stx : TSyntax `x64_operand) : X64ElabM Q(RelRegOrMem) := withRef stx do
   match stx with
   | `(x64_operand| $r:x64_reg) =>
-    let (reg, w) ← withOperandWidth none (elabReg r)
-    unless ← isDefEq w (toExpr Width.W64) do
-      throwError "expected a 64-bit register in relative addressing position"
-    pure (mkApp (mkConst ``RelRegOrMem.reg) reg)
+    let ⟨w, reg⟩ ← withOperandWidth none (elabReg (w := ·) r)
+    let .defEq _ ← isDefEqQ (u := 1) w q(.W64)
+      | throwError "expected a 64-bit register in relative addressing position"
+    pure q(.reg $reg)
   | `(x64_operand| $id:x64_ident) =>
-    let lbl ← getAsmIdent id
-    pure (toExpr (RelRegOrMem.rel (.sub (.label lbl) .after_current_instruction)))
+    let lbl : String ← getAsmIdent id
+    pure q(.rel (.sub (.label $lbl) .after_current_instruction))
   | `(x64_operand| $_:x64_const) =>
     -- Labels are handled above.
     throwError "absolute branch targets are not supported"
   | `(x64_operand| $m:x64_mem) =>
-    return mkApp (mkConst ``RelRegOrMem.mem) (← elabMem m)
+    let m ← elabMem m
+    return q(.mem $m)
   | _ => throwError "invalid branch target operand"
 
 /-- Evaluate an `x64_shift_count` (`$imm` or `%cl`) into a `ShiftCountExpr`. -/
@@ -429,7 +449,7 @@ def evalWidthSuffix (suffix : String) : TermElabM (Option Width) :=
 /-- Set the instruction's operation width from its mnemonic's width suffix, when present. -/
 def setSuffixWidth (stx : Syntax) : X64ElabM Unit := do
   if let some w ← evalWidthSuffix (← getAffixedSuffix stx) then
-    setOperandWidth (toExpr w)
+    setOperandWidth q($w)
 
 /-- Evaluate the condition-code suffix of a mnemonic (`cmov<cc>`, `set<cc>`, `j<cc>`). -/
 def evalCondCodeSuffix (stx : Syntax) : TermElabM CondCode := withRef stx do
@@ -445,43 +465,47 @@ def evalCondCodeSuffix (stx : Syntax) : TermElabM CondCode := withRef stx do
   | sfx                 => throwError "invalid condition code '{sfx}'"
 
 /-- The `Operation` constructor of an `x64_bin_op`. -/
-def elabBinOp (stx : TSyntax `x64_bin_op) : TermElabM Expr := withRef stx do
+def elabBinOp (stx : TSyntax `x64_bin_op) :
+    TermElabM Q({w : Width} → Dst w → Operand w → Operation w) := withRef stx do
   match (← splitSuffixed stx).1 with
-  | "add"            => pure (mkConst ``Operation.add)
-  | "adc"            => pure (mkConst ``Operation.adc)
-  | "sub"            => pure (mkConst ``Operation.sub)
-  | "sbb"            => pure (mkConst ``Operation.sbb)
-  | "mov" | "movabs" => pure (mkConst ``Operation.mov)
-  | "xor"            => pure (mkConst ``Operation.xor)
-  | "and"            => pure (mkConst ``Operation.and)
-  | "or"             => pure (mkConst ``Operation.or)
-  | "cmp"            => pure (mkConst ``Operation.cmp)
-  | "test"           => pure (mkConst ``Operation.test)
+  | "add"            => pure q(@Operation.add)
+  | "adc"            => pure q(@Operation.adc)
+  | "sub"            => pure q(@Operation.sub)
+  | "sbb"            => pure q(@Operation.sbb)
+  | "mov" | "movabs" => pure q(@Operation.mov)
+  | "xor"            => pure q(@Operation.xor)
+  | "and"            => pure q(@Operation.and)
+  | "or"             => pure q(@Operation.or)
+  | "cmp"            => pure q(@Operation.cmp)
+  | "test"           => pure q(@Operation.test)
   | stem             => throwError "invalid binary instruction mnemonic '{stem}'"
 
 /-- The `Operation` constructor of an `x64_rm_reg_op`. -/
-def elabRmRegOp (stx : TSyntax `x64_rm_reg_op) : TermElabM Expr := withRef stx do
+def elabRmRegOp (stx : TSyntax `x64_rm_reg_op) :
+    TermElabM Q({w : Width} → Reg w → RegOrMem w → Operation w) := withRef stx do
   match (← splitSuffixed stx).1 with
-  | "adcx" => pure (mkConst ``Operation.adcx)
-  | "adox" => pure (mkConst ``Operation.adox)
+  | "adcx" => pure q(@Operation.adcx)
+  | "adox" => pure q(@Operation.adox)
   | stem   => throwError "invalid carry-chain mnemonic '{stem}'"
 
 /-- The `Operation` constructor of an `x64_unary_op`. -/
-def elabUnaryOp (stx : TSyntax `x64_unary_op) : TermElabM Expr := withRef stx do
+def elabUnaryOp (stx : TSyntax `x64_unary_op) :
+    TermElabM Q({w : Width} → RegOrMem w → Operation w) := withRef stx do
   match (← splitSuffixed stx).1 with
-  | "mul" => pure (mkConst ``Operation.mul)
-  | "neg" => pure (mkConst ``Operation.neg)
-  | "dec" => pure (mkConst ``Operation.dec)
-  | "inc" => pure (mkConst ``Operation.inc)
-  | "not" => pure (mkConst ``Operation.not)
+  | "mul" => pure q(@Operation.mul)
+  | "neg" => pure q(@Operation.neg)
+  | "dec" => pure q(@Operation.dec)
+  | "inc" => pure q(@Operation.inc)
+  | "not" => pure q(@Operation.not)
   | stem  => throwError "invalid unary instruction mnemonic '{stem}'"
 
 /-- The `(srcWidth, dstWidth)` and `Operation` constructor of an `x64_ext_mov_op`. -/
-def elabExtMovOp (stx : TSyntax `x64_ext_mov_op) : TermElabM (Expr × Width × Width) := withRef stx do
+def elabExtMovOp (stx : TSyntax `x64_ext_mov_op) :
+    TermElabM (Q({w w' : Width} → Dst w → RegOrMem w' → Operation w) × Width × Width) := withRef stx do
   let (stem, sfx) ← splitSuffixed stx
-  let op : Expr ← match stem with
-    | "movs" => pure (mkConst ``Operation.movsx)
-    | "movz" => pure (mkConst ``Operation.movzx)
+  let op : Q({w w' : Width} → Dst w → RegOrMem w' → Operation w) ← match stem with
+    | "movs" => pure q(@Operation.movsx)
+    | "movz" => pure q(@Operation.movzx)
     | _      => throwError "invalid extending move mnemonic '{stem}'"
   let ws ← match sfx with
     | "bw"        => pure (.W8,  .W16)
@@ -494,228 +518,216 @@ def elabExtMovOp (stx : TSyntax `x64_ext_mov_op) : TermElabM (Expr × Width × W
   pure (op, ws)
 
 /-- The `AvxOperation` constructor of an `x64_avx_op`. -/
-def elabAvxOp (stx : TSyntax `x64_avx_op) : TermElabM Expr := withRef stx do
+def elabAvxOp (stx : TSyntax `x64_avx_op) :
+    TermElabM Q({w : AvxWidth} → AvxDst w → AvxRegOrMem w → AvxOperation w) := withRef stx do
   let (stem, sfx) ← splitSuffixed stx
   match stem, sfx with
-  | "movu",  "ps" => pure (mkConst ``AvxOperation.movups)
-  | "vmovu", "ps" => pure (mkConst ``AvxOperation.vmovups)
-  | "mova",  "ps" => pure (mkConst ``AvxOperation.movaps)
-  | "add",   "ps" => pure (mkConst ``AvxOperation.addps)
-  | "sub",   "ps" => pure (mkConst ``AvxOperation.subps)
+  | "movu",  "ps" => pure q(@AvxOperation.movups)
+  | "vmovu", "ps" => pure q(@AvxOperation.vmovups)
+  | "mova",  "ps" => pure q(@AvxOperation.movaps)
+  | "add",   "ps" => pure q(@AvxOperation.addps)
+  | "sub",   "ps" => pure q(@AvxOperation.subps)
   | _, _          => throwError "invalid AVX mnemonic"
 
 /-- The `Operation` constructor of an `x64_shift_op`. -/
-def elabShiftOp (stx : TSyntax `x64_shift_op) : TermElabM Expr := withRef stx do
+def elabShiftOp (stx : TSyntax `x64_shift_op) :
+    TermElabM Q({w : Width} → Dst w → ShiftCountExpr → Operation w) := withRef stx do
   match (← splitSuffixed stx).1 with
-  | "shl" | "sal" => pure (mkConst ``Operation.shl)
-  | "shr"         => pure (mkConst ``Operation.shr)
-  | "sar"         => pure (mkConst ``Operation.sar)
-  | "rol"         => pure (mkConst ``Operation.rol)
-  | "ror"         => pure (mkConst ``Operation.ror)
-  | "rcl"         => pure (mkConst ``Operation.rcl)
-  | "rcr"         => pure (mkConst ``Operation.rcr)
+  | "shl" | "sal" => pure q(@Operation.shl)
+  | "shr"         => pure q(@Operation.shr)
+  | "sar"         => pure q(@Operation.sar)
+  | "rol"         => pure q(@Operation.rol)
+  | "ror"         => pure q(@Operation.ror)
+  | "rcl"         => pure q(@Operation.rcl)
+  | "rcr"         => pure q(@Operation.rcr)
   | stem          => throwError "invalid shift/rotate mnemonic '{stem}'"
 
 /-- The `Operation` constructor of an `x64_shd_op`. -/
-def elabShdOp (stx : TSyntax `x64_shd_op) : TermElabM Expr := withRef stx do
+def elabShdOp (stx : TSyntax `x64_shd_op) :
+    TermElabM Q({w : Width} → Dst w → Reg w → ShiftCountExpr → Operation w) := withRef stx do
   match ← getAffixedStem stx with
-  | "shld" => pure (mkConst ``Operation.shld)
-  | "shrd" => pure (mkConst ``Operation.shrd)
+  | "shld" => pure q(@Operation.shld)
+  | "shrd" => pure q(@Operation.shrd)
   | stem   => throwError "invalid double-precision shift mnemonic '{stem}'"
 
 -- ============================================================================
 -- Instruction Elaboration
 -- ============================================================================
 
-
-/-- Elaborate an `x64_instr` syntax node into a `Lean.Expr` of type `Instr`. Each arm names the
-    operation's constructor `mk` and records the mnemonic's width suffix before elaborating the operands,
-    so that an operand disagreeing with the suffix is reported against the suffix. -/
-def elabInstr (stx : TSyntax `x64_instr) : X64ElabM Expr := withRef stx do
+/-- Elaborate an `x64_instr` syntax node into a `Q(Instr)`. Each arm records the mnemonic's width
+    suffix before elaborating the operands, so that an operand disagreeing with the suffix is reported
+    against the suffix. -/
+def elabInstr (stx : TSyntax `x64_instr) : X64ElabM Q(Instr) := withRef stx do
+  let w ← getOperandWidth
   match stx with
-  | `(x64_instr| ❰ $t ❱) => elabAntiquot t (mkConst ``Instr)
+  | `(x64_instr| ❰ $t ❱) => elabAntiquot t
   | `(x64_instr| .align $align:num $[, $pad?:num]?) =>
-    mkClosedInstr (.nopalign align.getNat (pad?.map (·.getNat)))
+    let align : Nat := align.getNat
+    let pad? : Option Nat := pad?.map (·.getNat)
+    return q(.regular .W64 .W64 (.nopalign $align $pad?))
   | `(x64_instr| $op:x64_bin_op $src:x64_operand, $dst:x64_operand) =>
     let mk ← elabBinOp op
     setSuffixWidth op
     let src ← elabOperand src
     let dst ← elabRegOrMemOperand dst
-    mkRegularInstr (← mkAppWidth mk #[dst, src])
+    mkRegularInstr w q($mk $dst $src)
   | `(x64_instr| $op:x64_rm_reg_op $src:x64_operand, $dst:x64_reg) =>
     let mk ← elabRmRegOp op
     setSuffixWidth op
     let src ← elabRegOrMemOperand src
     let dst ← elabReg dst
-    mkRegularInstr (← mkAppWidth mk #[dst, src])
+    mkRegularInstr w q($mk $dst $src)
   | `(x64_instr| $op:x64_cmov_op $src:x64_operand, $dst:x64_reg) =>
-    let mk := mkConst ``Operation.cmovcc
-    let cc ← evalCondCodeSuffix op
+    let cc : CondCode ← evalCondCodeSuffix op
     let src ← elabRegOrMemOperand src
     let dst ← elabReg dst
-    mkRegularInstr (← mkAppWidth mk #[toExpr cc, dst, src])
+    mkRegularInstr w q(.cmovcc $cc $dst $src)
   | `(x64_instr| $op:x64_unary_op $dst:x64_operand) =>
     let mk ← elabUnaryOp op
     setSuffixWidth op
     let dst ← elabRegOrMemOperand dst
-    mkRegularInstr (← mkAppWidth mk #[dst])
+    mkRegularInstr w q($mk $dst)
   | `(x64_instr| $op:x64_set_op $dst:x64_operand) =>
-    let mk := mkConst ``Operation.setcc
-    let cc ← evalCondCodeSuffix op
-    setOperandWidth (toExpr Width.W8)
+    let cc : CondCode ← evalCondCodeSuffix op
+    setOperandWidth q(.W8)
     let dst ← elabRegOrMemOperand dst
-    mkRegularInstr (← mkAppWidth mk #[toExpr cc, dst])
+    mkRegularInstr w q(.setcc $cc $dst)
   | `(x64_instr| $op:x64_imul_op $src:x64_operand) =>
-    let mk := mkConst ``Operation.imul1
     setSuffixWidth op
     let src ← elabRegOrMemOperand src
-    mkRegularInstr (← mkAppWidth mk #[src])
+    mkRegularInstr w q(.imul1 $src)
   | `(x64_instr| $op:x64_imul_op $src:x64_operand, $dst:x64_operand) =>
-    let mk := mkConst ``Operation.imul
     setSuffixWidth op
     let src ← elabOperand src
     let dst ← elabRegOrMemOperand dst
-    let noDst ← mkNone (← mkAppWidth (mkConst ``RegOrMem))
-    mkRegularInstr (← mkAppWidth mk #[noDst, dst, src])
+    mkRegularInstr w q(.imul none $dst $src)
   | `(x64_instr| $op:x64_imul_op $src1:x64_operand, $src2:x64_operand, $dst:x64_reg) =>
-    let mk := mkConst ``Operation.imul
     setSuffixWidth op
     let src1 ← elabOperand src1
     let src2 ← elabRegOrMemOperand src2
-    let dst ← mkAppWidth (mkConst ``RegOrMem.reg) #[← elabReg dst]
-    let dst ← mkSome (← mkAppWidth (mkConst ``RegOrMem)) dst
-    mkRegularInstr (← mkAppWidth mk #[dst, src2, src1])
+    let dst ← elabReg dst
+    mkRegularInstr w q(.imul (some (.reg $dst)) $src2 $src1)
   | `(x64_instr| $op:x64_mulx_op $src:x64_operand, $lo:x64_reg, $hi:x64_reg) =>
-    let mk := mkConst ``Operation.mulx
     setSuffixWidth op
     let src ← elabRegOrMemOperand src
     let lo ← elabReg lo
     let hi ← elabReg hi
-    mkRegularInstr (← mkAppWidth mk #[hi, lo, src])
+    mkRegularInstr w q(.mulx $hi $lo $src)
   | `(x64_instr| movsx $src:x64_reg, $dst:x64_reg) =>
-    let mk := mkConst ``Operation.movsx
-    let dst ← mkAppWidth (mkConst ``RegOrMem.reg) #[← elabReg dst]
-    let (src, wSrc) ← withFreshOperandWidthUnderCurrent do mkAppWidth (mkConst ``RegOrMem.reg) #[← elabReg src]
-    mkRegularInstr (← mkAppWidth mk #[wSrc, dst, src])
+    let dst ← elabReg dst
+    let ⟨_, src⟩ ← withFreshOperandWidthUnderCurrent (elabReg (w := ·) src)
+    mkRegularInstr w q(.movsx (.reg $dst) (.reg $src))
   | `(x64_instr| movzx $src:x64_reg, $dst:x64_reg) =>
-    let mk := mkConst ``Operation.movzx
-    let dst ← mkAppWidth (mkConst ``RegOrMem.reg) #[← elabReg dst]
-    let (src, wSrc) ← withFreshOperandWidthUnderCurrent do mkAppWidth (mkConst ``RegOrMem.reg) #[← elabReg src]
-    mkRegularInstr (← mkAppWidth mk #[wSrc, dst, src])
+    let dst ← elabReg dst
+    let ⟨_, src⟩ ← withFreshOperandWidthUnderCurrent (elabReg (w := ·) src)
+    mkRegularInstr w q(.movzx (.reg $dst) (.reg $src))
   | `(x64_instr| $op:x64_ext_mov_op $src:x64_operand, $dst:x64_reg) =>
     let (mk, wSrc, wDst) ← elabExtMovOp op
-    setOperandWidth (toExpr wDst)
-    let dst ← mkAppWidth (mkConst ``RegOrMem.reg) #[← elabReg dst]
-    let (src, _) ← withOperandWidth (some wSrc) (elabRegOrMemOperand src)
-    mkRegularInstr (← mkAppWidth mk #[toExpr wSrc, dst, src])
+    setOperandWidth q($wDst)
+    let dst ← elabReg dst
+    let ⟨_, src⟩ ← withOperandWidth (some wSrc) (elabRegOrMemOperand (w := ·) src)
+    mkRegularInstr w q($mk (.reg $dst) $src)
   | `(x64_instr| $op:x64_lea_op $m:x64_mem, $dst:x64_reg) =>
-    let mk := mkConst ``Operation.lea
     setSuffixWidth op
     let src ← elabMem m
     let dst ← elabReg dst
-    mkRegularInstr (← mkAppWidth mk #[dst, src])
+    mkRegularInstr w q(.lea $dst $src)
   | `(x64_instr| $op:x64_avx_op $src:x64_avx_operand, $dst:x64_avx_operand) =>
+    let w ← getAvxOperandWidth
     let mk ← elabAvxOp op
     let src ← elabAvxRegOrMem src
     let dst ← elabAvxRegOrMem dst
-    mkAvxInstr (← mkAppWidth mk #[dst, src])
+    mkAvxInstr w q($mk $dst $src)
   | `(x64_instr| $op:x64_shift_op $dst:x64_operand) =>
     let mk ← elabShiftOp op
     setSuffixWidth op
     let dst ← elabRegOrMemOperand dst
-    mkRegularInstr (← mkAppWidth mk #[dst, toExpr (ShiftCountExpr.imm8 (.int64 1))])
+    mkRegularInstr w q($mk $dst (.imm8 (.int64 1)))
   | `(x64_instr| $op:x64_shift_op $cnt:x64_shift_count, $dst:x64_operand) =>
     let mk ← elabShiftOp op
     setSuffixWidth op
-    let cnt ← evalShiftCount cnt
+    let cnt : ShiftCountExpr ← evalShiftCount cnt
     let dst ← elabRegOrMemOperand dst
-    mkRegularInstr (← mkAppWidth mk #[dst, toExpr cnt])
+    mkRegularInstr w q($mk $dst $cnt)
   | `(x64_instr| $op:x64_shd_op $cnt:x64_shift_count, $src:x64_reg, $dst:x64_operand) =>
     let mk ← elabShdOp op
     setSuffixWidth op
-    let cnt ← evalShiftCount cnt
+    let cnt : ShiftCountExpr ← evalShiftCount cnt
     let src ← elabReg src
     let dst ← elabRegOrMemOperand dst
-    mkRegularInstr (← mkAppWidth mk #[dst, src, toExpr cnt])
+    mkRegularInstr w q($mk $dst $src $cnt)
   | `(x64_instr| $op:x64_bswap_op $dst:x64_reg) =>
-    let mk := mkConst ``Operation.bswap
     setSuffixWidth op
     let dst ← elabReg dst
-    mkRegularInstr (← mkAppWidth mk #[dst])
+    mkRegularInstr w q(.bswap $dst)
   | `(x64_instr| $op:x64_push_op $src:x64_operand) =>
-    let mk := mkConst ``Operation.push
     setSuffixWidth op
     let src ← elabOperand src
-    mkRegularInstr (← mkAppWidth mk #[src]) (ifUndetermined := some .W64)
+    mkRegularInstr w q(.push $src) (ifUndetermined := some .W64)
   | `(x64_instr| $op:x64_pop_op $dst:x64_operand) =>
-    let mk := mkConst ``Operation.pop
     setSuffixWidth op
     let dst ← elabRegOrMemOperand dst
-    mkRegularInstr (← mkAppWidth mk #[dst]) (ifUndetermined := some .W64)
+    mkRegularInstr w q(.pop $dst) (ifUndetermined := some .W64)
   | `(x64_instr| ret) | `(x64_instr| retq) =>
-    mkClosedInstr .ret
+    return q(.regular .W64 .W64 .ret)
   | `(x64_instr| call $target:x64_operand) | `(x64_instr| callq $target:x64_operand) =>
-    let mk := mkConst ``Operation.call
-    setOperandWidth (toExpr Width.W64)
+    setOperandWidth q(.W64)
     let target ← elabRelTarget target
-    mkRegularInstr (← mkAppWidth mk #[target])
+    mkRegularInstr w q(.call $target)
   | `(x64_instr| jmp $target:x64_operand) | `(x64_instr| jmpq $target:x64_operand) =>
-    let mk := mkConst ``Operation.jmp
-    setOperandWidth (toExpr Width.W64)
+    setOperandWidth q(.W64)
     let target ← elabRelTarget target
-    mkRegularInstr (← mkAppWidth mk #[target])
+    mkRegularInstr w q(.jmp $target)
   | `(x64_instr| nop) =>
-    mkClosedInstr (.nop 1)
+    return q(.regular .W64 .W64 (.nop 1))
   | `(x64_instr| nop $sz:num) =>
-    mkClosedInstr (.nop sz.getNat)
+    let sz : Nat := sz.getNat
+    return q(.regular .W64 .W64 (.nop $sz))
   | `(x64_instr| $op:x64_jcc_op $lbl:x64_ident) =>
-    let cc ← evalCondCodeSuffix op
-    let target ← getAsmIdent lbl
-    mkClosedInstr (.jcc cc target)
+    let cc : CondCode ← evalCondCodeSuffix op
+    let target : String ← getAsmIdent lbl
+    return q(.regular .W64 .W64 (.jcc $cc $target))
   | _ => throwError "invalid instruction syntax"
-where
-  /-- A 64-bit instruction without operands to infer widths from. -/
-  mkClosedInstr (op : Operation .W64) : X64ElabM Expr :=
-    pure (toExpr (Instr.regular .W64 .W64 op))
 
 -- ============================================================================
 -- Directive & Program Elaboration
 -- ============================================================================
 
-/-- Elaborate an `x64_directive` syntax node into a `Lean.Expr` of type `Directive`. -/
-def elabDirective (stx : TSyntax `x64_directive) : TermElabM Expr := withRef stx do
+/-- Elaborate an `x64_directive` syntax node into a `Q(Directive)`. -/
+def elabDirective (stx : TSyntax `x64_directive) : TermElabM Q(Directive) := withRef stx do
   match stx with
   | `(x64_directive| $lbl:x64_ident :)
   | `(x64_directive| $lbl:x64_ident : ;) =>
-    let name ← getAsmIdent lbl
-    pure (Lean.toExpr (Directive.label name))
+    let name : String ← getAsmIdent lbl
+    pure q(Directive.label $name)
   | `(x64_directive| $ins:x64_instr ;)
   | `(x64_directive| $ins:x64_instr) =>
-    return mkApp (mkConst ``Directive.instr) (← (elabInstr ins).run)
+    let ins ← (elabInstr ins).run
+    return q(Directive.instr $ins)
   | `(x64_directive| ❰ $t ❱ ;)
   | `(x64_directive| ❰ $t ❱) =>
     -- A statement-level antiquotation shadows the instruction-level one, so accept an `Instr` here too.
     let e ← withoutErrToSorry <| withSynthesize <| elabTerm t none
-    if ← isDefEq (← inferType e) (mkConst ``Instr) then
-      return mkApp (mkConst ``Directive.instr) e
-    ensureHasType (mkConst ``Directive) e
+    if ← isDefEq (← inferType e) q(Instr) then
+      let ins : Q(Instr) := e
+      return q(Directive.instr $ins)
+    ensureHasType q(Directive) e
   | _ => throwError "invalid assembly directive"
 
-/-- Elaborate an `x64_prog` syntax node into a `Lean.Expr` of type `Program` (`List Directive`). -/
-def elabProgram (stx : TSyntax `x64_prog) : TermElabM Expr := withRef stx do
+/-- Elaborate an `x64_prog` syntax node into a `Q(Program)` (`Q(List Directive)`). -/
+def elabProgram (stx : TSyntax `x64_prog) : TermElabM Q(Program) := withRef stx do
   match stx with
   | `(x64_prog| $dirs:x64_directive*) =>
     let dirExprs ← dirs.mapM elabDirective
-    mkListLit (mkConst ``Directive) dirExprs.toList
+    return dirExprs.foldr (fun d acc => q($d :: $acc)) q([])
   | _ => throwError "invalid assembly program"
 
 -- ============================================================================
 -- Public String Parser/Elaborator & Macros
 -- ============================================================================
 
-/-- Parse and elaborate an X64 assembly string (with `# ...` line comments) into a `Lean.Expr`
-    representing a Kraken `Program`. -/
-public def elabX64 (s : String) : TermElabM Expr :=
+/-- Parse and elaborate an X64 assembly string (with `# ...` line comments) into a `Q(Program)`. -/
+public def elabX64 (s : String) : TermElabM Q(Program) :=
   elabCategory `x64_prog elabProgram (replaceLineComments "#" s)
 
 end
@@ -732,8 +744,8 @@ elab "parse(" s:str ")" : term => do
 
 /-- Read a file at elaboration time and return its contents as a string literal. -/
 elab "fileAsString(" path:str ")" : term => do
-  let contents ← IO.FS.readFile path.getString
-  return mkStrLit contents
+  let contents : String ← IO.FS.readFile path.getString
+  return q($contents)
 
 /-- Read an X64 assembly file, strip assembler directives, parse via `runParserCategory`,
     and elaborate into a Kraken `Program`. -/
