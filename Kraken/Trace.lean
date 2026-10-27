@@ -41,6 +41,7 @@ inductive Trace where
   | yield (value : eff.In) (cont : eff.Out value → Trace)
 -- NOTE: With this encoding, we represent failed states as effects with empty output types.
 -- We could choose to represent them explicitly with a separate constructor instead.s
+-- NOTE: What if we add jumps / gotos as special effects? We could also bundle them as part of the output.
 
 namespace Trace
 variable {eff :  Effect} {Result : Type _}
@@ -49,17 +50,18 @@ def All (post : Result → Prop) : Trace eff Result → Prop
   | .done value => post value
   | .yield val cont =>
     Nonempty (eff.Out val) ∧  -- NOTE: We use `Nonempty` here to exclude traces without a result
+                              -- NOTE: Actually, this doesn't work since `NonMemStore` should also be cut.
+                              --  We may need a separate marker.
     ∀ o, (cont o).All post
 
 -- NOTE: Trans written like this is more of a predecessor relation.
 variable (trans : (Trace eff Result → Prop) → (Trace eff Result → Prop)) in
-variable (ret : (Trace eff Result → Prop)) in
 -- NOTE: This definition is generic enough if we have some `o x`, `o x → o x` and ways to relate `x` with `o x`
 -- Is there a mathematical structure with this shape?
-inductive Eventually : Trace eff Result → Prop where
-  | now {t} (h : ret t) : t.Eventually
+inductive Eventually (ret : Trace eff Result → Prop) : Trace eff Result → Prop where
+  | now {t} (h : ret t) : t.Eventually ret
   | later {t} (mid_p : Trace eff Result → Prop) (h : trans mid_p t /- t ∈ trans mid_p -/)
-      (hn : ∀ y, mid_p y /- y ∈ mid_p -/ → y.Eventually) : t.Eventually
+      (hn : ∀ y, mid_p y /- y ∈ mid_p -/ → y.Eventually ret) : t.Eventually ret
 
 -- NOTE: This `Eventually` is not really defined for a trace. It is defined for a "transition system" such
 -- as the one given by `trans` and `ret`. `ret` defines the final states, `trans` defines the transitions.
