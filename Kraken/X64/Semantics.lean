@@ -7,6 +7,7 @@ import Kraken.Attribute
 public import Kraken.Layout
 public import Kraken.Mem
 meta import Kraken.Mem
+public import Kraken.Trace
 public import Kraken.X64.Syntax
 meta import Kraken.X64.Syntax
 public import Lean.ToExpr
@@ -264,19 +265,84 @@ structure MachineState where
   data : MachineData
   pc : Int64
 
-inductive Effects
-  | done (a : MachineState)
-  | unimplemented (msg : String)
-  | gp_unaligned (addr : BitVec 64) (w : Nat)
-  -- loads and stores *outside* the data memory, eg. MMIO, might still affect the data memory:
-  -- for instance, MMIO reads/writes at certain device register addresses might change what
-  -- data memory the process logically owns vs what memory is owned by devices
-  | nonmem_load (dmem : DataMem) (addr : BitVec 64) (w : Width) (ret : w.type → DataMem → Effects)
-  | nonmem_store (dmem : DataMem) (addr : BitVec 64) {w : Width} (v : w.type) (ret: DataMem → Effects)
-  | undefined {α : Type} [NondetSupportingType α] (ret : α → Effects)
-  | require_read_access (addr : BitVec 64) (w : Width) (ok : Unit → Effects)
-  | require_write_access (addr : BitVec 64) (w : Width) (ok : Unit → Effects)
-  | require_exec_access (p: Std.Rco Int64) (ok : Unit → Effects)
+namespace X64Effects
+
+@[kstep] def Unimplemented : Effect := Effect.mkNonrecoverable String
+@[kstep] def GpUnaligned : Effect := Effect.mkNonrecoverable <| BitVec 64 × Nat
+
+@[kstep] def NonMemLoad : Effect where
+  In := DataMem × (BitVec 64) × Width
+  Out := fun (_, _, w) => w.type × DataMem
+
+@[kstep] def NonMemStore : Effect where
+  In := DataMem × (BitVec 64) × (w : Width) × w.type
+  Out := fun _ => DataMem
+
+@[kstep] def Undefined : Effect where
+  In := (α : Type) × NondetSupportingType α
+  Out := fun ⟨α, _⟩ => α
+
+@[kstep] def RequireReadAccess : Effect := .mkMark <| BitVec 64 × Width
+@[kstep] def RequireWriteAccess : Effect := .mkMark <| BitVec 64 × Width
+@[kstep] def RequireExecAccess : Effect := .mkMark <| Std.Rco Int64
+
+@[kstep] abbrev All := Unimplemented   ∪ₑ GpUnaligned
+        ∪ₑ NonMemLoad         ∪ₑ NonMemStore
+        ∪ₑ Undefined          ∪ₑ RequireReadAccess
+        ∪ₑ RequireWriteAccess ∪ₑ RequireExecAccess
+
+@[kstep] def All.epost : (val : All.In) → (All.Out val → Prop) → Prop
+  | Effect.Incl.input (a := Unimplemented) _, _
+  | Effect.Incl.input (a := GpUnaligned) _, _
+  | Effect.Incl.input (a := NonMemLoad) _, _
+  | Effect.Incl.input (a := NonMemStore) _, _
+    => False
+  | Effect.Incl.input (a := Undefined) ⟨α, _⟩, contP
+    => ∀ (o : α), contP o
+  | Effect.Incl.input (a := RequireReadAccess) _, contP
+  | Effect.Incl.input (a := RequireWriteAccess) _, contP
+  | Effect.Incl.input (a := RequireExecAccess) _, contP
+    => contP ()
+
+@[kstep] def All.Handlers (post : MachineState → Prop) :
+    Trace.All.Handlers All MachineState where
+  post := post
+  epost := All.epost
+
+end X64Effects
+
+abbrev Effects := Trace X64Effects.All MachineState
+
+namespace Effects
+
+@[match_pattern, kstep] abbrev done (res : MachineState) : Effects :=
+  .fallthrough res
+
+@[match_pattern, kstep] def unimplemented (msg : String) (fn : Empty → Effects := nofun) : Effects :=
+  .yield (Effect.Incl.input (a := X64Effects.Unimplemented) msg) fn
+
+@[match_pattern, kstep] def gp_unaligned (addr : BitVec 64) (w : Nat) (fn : Empty → Effects := nofun) : Effects :=
+  .yield (Effect.Incl.input (a := X64Effects.GpUnaligned) (addr, w)) fn
+
+-- loads and stores *outside* the data memory, eg. MMIO, might still affect the data memory:
+-- for instance, MMIO reads/writes at certain device register addresses might change what
+-- data memory the process logically owns vs what memory is owned by devices
+@[match_pattern, kstep] def nonmem_load (dmem : DataMem) (addr : BitVec 64) (w : Width) (ret : w.type × DataMem → Effects) : Effects :=
+  .yield (Effect.Incl.input (a := X64Effects.NonMemLoad) (dmem, addr, w)) ret
+@[match_pattern, kstep] def nonmem_store (dmem : DataMem) (addr : BitVec 64) {w : Width} (v : w.type) (ret: DataMem → Effects) : Effects :=
+  .yield (Effect.Incl.input (a := X64Effects.NonMemStore) ⟨dmem, addr, w, v⟩) ret
+
+@[match_pattern, kstep] def undefined {α : Type} [ι : NondetSupportingType α] (ret : α → Effects) : Effects :=
+  .yield (Effect.Incl.input (a := X64Effects.Undefined) ⟨α, ι⟩) ret
+
+@[match_pattern, kstep] def require_read_access (addr : BitVec 64) (w : Width) (ok : Unit → Effects) : Effects :=
+  .yield (Effect.Incl.input (a := X64Effects.RequireReadAccess) ⟨addr, w⟩) ok
+@[match_pattern, kstep] def require_write_access (addr : BitVec 64) (w : Width) (ok : Unit → Effects) : Effects :=
+  .yield (Effect.Incl.input (a := X64Effects.RequireWriteAccess) ⟨addr, w⟩) ok
+@[match_pattern, kstep] def require_exec_access (p: Std.Rco Int64) (ok : Unit → Effects) : Effects :=
+  .yield (Effect.Incl.input (a := X64Effects.RequireExecAccess) p) ok
+
+end Effects
 export Effects (unimplemented nonmem_load nonmem_store undefined require_read_access require_write_access require_exec_access)
 
 -- the unused `Std.Rco Int64` argument and the unmodified `MachineData` return
@@ -303,7 +369,7 @@ def MachineData.load
   require_read_access addr w (fun _unit =>
     match Mem.loadInt s.dmem addr w.bytes with
     | .some i => ret (.ofInt _ i) s
-    | .none => nonmem_load s.dmem addr w (fun v dmem => ret v { s with dmem }))
+    | .none => nonmem_load s.dmem addr w (fun (v, dmem) => ret v { s with dmem }))
 
 -- Alternatively, we could define this in terms of BitVecs without %:
 -- (addr &&& BitVec.ofNat 64 (bytes - 1)) == 0#64
@@ -825,15 +891,15 @@ partial def Executable.eval (e : Executable) (s : MachineState) (until_ : Machin
 where
   handleEffects es :=
     match es with
-    | .done s => eval e s until_
-    | .unimplemented msg => .error msg
-    | .gp_unaligned addr w => .error s!"#GP: Memory op at {repr addr} did not have mandatory alignment of {w}"
+    | .fallthrough s | .jump s => eval e s until_
+    | .unimplemented msg _ => .error msg
+    | .gp_unaligned addr w _ => .error s!"#GP: Memory op at {repr addr} did not have mandatory alignment of {w}"
     | .require_read_access _ _ ok => handleEffects (ok ())
     | .require_write_access _ _ ok => handleEffects (ok ())
     | .require_exec_access _ ok => handleEffects (ok ())
     | .nonmem_load _ addr _ _ => .error s!"Load at unmapped address {repr addr}"
     | .nonmem_store _ addr _ _ => .error s!"Store at unmapped address {repr addr}"
-    | @Effects.undefined _ t cont => handleEffects (cont (t.from_hash (hash s.1.regs)))
+    | .undefined (ι := t) cont => handleEffects (cont (t.from_hash (hash s.1.regs)))
 
 def Directive.fakeSize (hashOfProgram : UInt64) (d : Directive) : Nat :=
   match d with
