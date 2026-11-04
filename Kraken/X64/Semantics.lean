@@ -304,19 +304,11 @@ namespace X64Effects
   | Effect.Incl.input (a := RequireExecAccess) _, contP
     => contP ()
 
-@[kstep] def All.Handlers (post : MachineState → Prop) :
-    Trace.All.Handlers All MachineState where
-  post := post
-  epost := All.epost
-
 end X64Effects
 
 abbrev Effects := Trace X64Effects.All MachineState
 
 namespace Effects
-
-@[match_pattern, kstep] abbrev done (res : MachineState) : Effects :=
-  .fallthrough res
 
 @[match_pattern, kstep] def unimplemented (msg : String) (fn : Empty → Effects := nofun) : Effects :=
   .yield (Effect.Incl.input (a := X64Effects.Unimplemented) msg) fn
@@ -891,7 +883,7 @@ partial def Executable.eval (e : Executable) (s : MachineState) (until_ : Machin
 where
   handleEffects es :=
     match es with
-    | .fallthrough s | .jump s => eval e s until_
+    | .done s => eval e s until_
     | .unimplemented msg _ => .error msg
     | .gp_unaligned addr w _ => .error s!"#GP: Memory op at {repr addr} did not have mandatory alignment of {w}"
     | .require_read_access _ _ ok => handleEffects (ok ())

@@ -40,28 +40,49 @@ attribute [match_pattern, kstep] Incl.input
 
 end Effect
 
-variable (eff :  Effect) (Result : Type _) in
+variable (eff : Effect) (Result : Type _) in
 inductive Trace where
-  | fallthrough (res : Result)
-  | jump (res : Result)
+  | done (res : Result)
   | yield (value : eff.In) (cont : eff.Out value → Trace)
 
 namespace Trace
-variable {eff :  Effect} {Result : Type _}
 
-structure All.Handlers (eff : Effect) (Result : Type _) where
-  post  : Result → Prop
-  jpost : Result → Prop := post
-  fpost : Result → Prop := post
-  epost : (val : eff.In) → (eff.Out val → Prop) → Prop :=
-    λ _ contP => ∀ x, contP x
+@[kstep] protected def map.{u, v, w} {eff : Effect.{u}} {α : Type v} {β : Type w}
+    (f : α → β) : Trace eff α → Trace eff β
+  | .done a => .done (f a)
+  | .yield val cont => .yield val (fun o => Trace.map f (cont o))
 
--- variable (wp : Label → MachineState → (MachineState → Prop) → Prop) in
-variable (h : All.Handlers eff Result)
-@[kstep] def All : Trace eff Result → Prop
-  | .fallthrough value => h.fpost value
-  | .jump value => h.jpost value
-  | .yield val cont =>
-    h.epost val (cont · |>.All)
+@[kstep] protected def bind.{u, v, w} {eff : Effect.{u}} {α : Type v} {β : Type w}
+    (t : Trace eff α) (f : α → Trace eff β) : Trace eff β :=
+  match t with
+  | .done a => f a
+  | .yield val cont => .yield val (fun o => Trace.bind (cont o) f)
+
+instance instMonad.{u, v} {eff : Effect.{u}} : Monad (Trace.{u, v} eff) where
+  pure := .done
+  map := Trace.map
+  bind := Trace.bind
+
+instance instLawfulMonad.{u, v} {eff : Effect.{u}} : LawfulMonad (Trace.{u, v} eff) :=
+  LawfulMonad.mk'
+    (id_map := fun t => by
+      induction t with
+      | done _ => rfl
+      | yield _ _ ih => exact congrArg _ (funext ih))
+    (pure_bind := fun _ _ => rfl)
+    (bind_assoc := fun t _ _ => by
+      induction t with
+      | done _ => rfl
+      | yield _ _ ih => exact congrArg _ (funext ih))
+    (bind_pure_comp := fun _ t => by
+      induction t with
+      | done _ => rfl
+      | yield _ _ ih => exact congrArg _ (funext ih))
+
+@[kstep] def All {eff : Effect} {Result : Type _}
+    (epost : (val : eff.In) → (eff.Out val → Prop) → Prop)
+    (post : Result → Prop) : Trace eff Result → Prop
+  | .done value => post value
+  | .yield val cont => epost val (fun o => All epost post (cont o))
 
 end Trace
