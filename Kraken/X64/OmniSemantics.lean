@@ -11,7 +11,7 @@ public import Kraken.X64.Semantics
 @[expose] public section
 
 @[kstep] def Effects.All (post : MachineState → Prop) : Effects → Prop :=
-  Trace.All (X64Effects.All.Handlers post)
+  Trace.All X64Effects.All.epost post
 
 def step1 [Layout] (e: Executable) (s: MachineState) (post: @Post MachineState) : Prop :=
   (Executable.step e s .done).All post

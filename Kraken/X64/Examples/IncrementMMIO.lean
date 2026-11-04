@@ -92,7 +92,7 @@ def handleEffects (ds : IncrementerState) (es : Effects)
     (ok : SystemState → Except String SystemState) :
     Except String SystemState :=
   match es with
-  | .fallthrough ms | .jump ms => ok (.mk ms ds)
+  | .done ms => ok (.mk ms ds)
   | .unimplemented msg _ => .error msg
   | .gp_unaligned addr w _ => .error s!"#GP: Memory op at {repr addr} did not have mandatory alignment of {w}"
   | .require_read_access _ _ cont => handleEffects ds (cont ()) ok
