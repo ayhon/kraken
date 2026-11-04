@@ -306,7 +306,7 @@ namespace X64Effects
 
 end X64Effects
 
-abbrev Effects := Trace X64Effects.All MachineState
+abbrev Effects := Trace X64Effects.All (Exit × MachineState)
 
 namespace Effects
 
@@ -851,12 +851,12 @@ def Instr.interp [Labels]
 
 def Directives.interp [Labels]
   (ds : List (Kraken.Sized Directive)) (s : MachineData) (pc : Int64)
-  (ret : Int64 → MachineData → Effects) : Effects :=
+  (ret : Int64 → MachineData → Effects) (jmp : Int64 → MachineData → Effects := ret) : Effects :=
   match ds with
   | [] => ret pc s
   | {directive, size := sz} :: ds =>
-    directive.interp s (.mk pc (pc+.ofNat sz)) (jmp:=ret) (next := (fun s =>
-    interp ds s (pc+.ofNat sz) ret))
+    directive.interp s (.mk pc (pc+.ofNat sz)) (jmp:=jmp) (next := (fun s =>
+    interp ds s (pc+.ofNat sz) ret jmp))
 
 abbrev Layout := Kraken.Layout Directive
 
@@ -868,22 +868,24 @@ def Executable.labels (e : Executable) : Labels :=
 def Executable.directivesFromLabel (e : Executable) (l : Label) : List (Kraken.Sized Directive) :=
   e.program.dropWhile (·.directive != .label l)
 
-def Executable.step (e : Executable) (s : MachineState) (ret : MachineState → Effects) : Effects :=
+def Executable.step (e : Executable) (s : MachineState)
+    (ret : MachineState → Effects := .fallthrough) (jmp : MachineState → Effects := .jump) : Effects :=
   let := Executable.labels e
-  Directives.interp (e.directivesAtAddress s.pc) s.data s.pc (fun pc s => ret ⟨s, pc⟩)
+  Directives.interp (e.directivesAtAddress s.pc) s.data s.pc (fun pc s => ret ⟨s, pc⟩) (fun pc s => jmp ⟨s, pc⟩)
 
-def Executable.straightline (e : Executable) (s : MachineState) (ret : MachineState → Effects) : Effects :=
+def Executable.straightline (e : Executable) (s : MachineState)
+    (ret : MachineState → Effects := .fallthrough) (jmp : MachineState → Effects := .jump) : Effects :=
   let := Executable.labels e
-  Directives.interp (e.directivesFromAddress s.pc) s.data s.pc (fun pc s => ret ⟨s, pc⟩)
+  Directives.interp (e.directivesFromAddress s.pc) s.data s.pc (fun pc s => ret ⟨s, pc⟩) (fun pc s => jmp ⟨s, pc⟩)
 
 -- -- Concrete evaluators for expedient testing
 
 partial def Executable.eval (e : Executable) (s : MachineState) (until_ : MachineState → Bool) : Except String (MachineState) :=
-  if until_ s then .ok s else handleEffects (Executable.straightline e s .done)
+  if until_ s then .ok s else handleEffects (Executable.straightline e s)
 where
   handleEffects es :=
     match es with
-    | .done s => eval e s until_
+    | .exit (_, s) => eval e s until_
     | .unimplemented msg _ => .error msg
     | .gp_unaligned addr w _ => .error s!"#GP: Memory op at {repr addr} did not have mandatory alignment of {w}"
     | .require_read_access _ _ ok => handleEffects (ok ())

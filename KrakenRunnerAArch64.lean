@@ -96,7 +96,7 @@ instance : StatusFlagBits StatusFlags where
 -- Runs `Effects` to completion, resolving every `undefined` choice with `h`. Also returns
 -- whether any `undefined` choice was made.
 partial def evalEffects (h : UInt64) (sawUndef : Bool) : Effects → Option (MachineData × Bool)
-  | .done st => some (st.data, sawUndef)
+  | .exit (_, st) => some (st.data, sawUndef)
   | .require_read_access _ _ ok | .require_write_access _ _ ok | .require_exec_access _ ok => evalEffects h sawUndef (ok ())
   | .undefined (ι := t) cont => evalEffects h true (cont (t.from_hash h))
   | _ => none
@@ -180,7 +180,7 @@ def fuzzConfig : FuzzConfig MachineData StatusFlags StateSummary where
     let exe := Program.fakeLayout (← (Kraken.AArch64.Parser.parse asmCode).toOption)
     let := exe.labels
     return exe.withAddresses.map fun d =>
-      { d with directive := fun s p h => evalEffects h false (d.directive.interp s p (fun s => .done ⟨s, p.upper⟩) (fun _ _ => .unimplemented "jump")) }
+      { d with directive := fun s p h => evalEffects h false (d.directive.interp s p (fun s => .fallthrough ⟨s, p.upper⟩) (fun _ _ => .unimplemented "jump")) }
   summarize := summarize
   genInstr := Kraken.AArch64.Print.instr <$> gen
   runAssembler := runAssembler
