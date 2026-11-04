@@ -93,8 +93,8 @@ def handleEffects (ds : IncrementerState) (es : Effects)
     Except String SystemState :=
   match es with
   | .done ms => ok (.mk ms ds)
-  | .unimplemented msg => .error msg
-  | .gp_unaligned addr w => .error s!"#GP: Memory op at {repr addr} did not have mandatory alignment of {w}"
+  | .unimplemented msg _ => .error msg
+  | .gp_unaligned addr w _ => .error s!"#GP: Memory op at {repr addr} did not have mandatory alignment of {w}"
   | .require_read_access _ _ cont => handleEffects ds (cont ()) ok
   | .require_write_access _ _ cont => handleEffects ds (cont ()) ok
   | .require_exec_access _ cont => handleEffects ds (cont ()) ok
@@ -106,8 +106,8 @@ def handleEffects (ds : IncrementerState) (es : Effects)
         | throw s!"nonmem_load at unmapped address {repr addr}"
       let some (reply, ds') := ds.read_step r
         | throw s!"Incrementer.read_step failed"
-      handleEffects ds' (cont (h ▸ UInt32.toBitVec reply) dmem) ok
-  | @Effects.nonmem_store dmem addr w v cont =>
+      handleEffects ds' (cont (h ▸ UInt32.toBitVec reply, dmem)) ok
+  | .nonmem_store (w := w) dmem addr v cont =>
     match w with
       | .W32 => match Incrementer.Register.of_addr (UInt64.ofBitVec addr) with
         | .some r => match ds.write_step r (UInt32.ofBitVec v) with
@@ -116,7 +116,7 @@ def handleEffects (ds : IncrementerState) (es : Effects)
           | .none => .error s!"Incrementer.write_step failed"
         | .none => .error s!"nonmem_store at unmapped address {repr addr}"
       | _ => .error s!"nonmem_store of width other than 4 bytes"
-  | @Effects.undefined _ t cont => handleEffects ds (cont (t.from_hash (hash ds))) ok
+  | .undefined (ι := t) cont => handleEffects ds (cont (t.from_hash (hash ds))) ok
 
 def eval_schedule (schedule : List Bool) (e : Executable) (s : SystemState)
     : Except String SystemState :=

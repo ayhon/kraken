@@ -148,7 +148,7 @@ def kdeltaBetaOnly (targets: List Name) (maxInstrCount : Option (IO.Ref Nat)) : 
   -- semantics. Concretely: `f (let x = ... in arg)` => `let x = ... in f arg`.
   peelArgsLets args 0 #[] #[] fun (args : Array Expr) (fvars : Array Expr) => do
 
-    if f.isConstOf `Effects.All && args[1]!.isApp && args[1]!.getAppFn'.isConstOf `Directives.interp then
+    if (f.isConstOf `Effects.All || f.isConstOf `Trace.All) && args.back!.isApp && args.back!.getAppFn'.isConstOf `Directives.interp then
       -- We optionally track how many times we've hit Directives.interp -- this tracks how
       -- many instructions we've stepped through.
       if (← maxInstrCount.mapM (·.get)) = .some 0 then
@@ -159,8 +159,9 @@ def kdeltaBetaOnly (targets: List Name) (maxInstrCount : Option (IO.Ref Nat)) : 
       -- means that we are ready to step through. We manually force reduction of
       -- Directives.interp (since it is *not* is our list of targets), then let
       -- everything simplify until we're called again.
-      let some arg1 ← Meta.unfoldDefinition? args[1]! true | throwError "can't unfold Directives.interp"
-      let e := mkAppN f (args.set! 1 arg1)
+      let lastIdx := args.size - 1
+      let some argLast ← Meta.unfoldDefinition? args[lastIdx]! true | throwError "can't unfold Directives.interp"
+      let e := mkAppN f (args.set! lastIdx argLast)
       let e' ← shareCommon e
       let e'' ← mkLetFVars fvars e'
       return .step e''
@@ -267,7 +268,7 @@ def kdsimpProj : DSimproc := fun e => do
 def kLiftLets : DSimproc := fun e => do
   -- We only lift lets to the top-level (which is always an application of
   -- Effects.all)
-  unless e.isApp && e.getAppFn'.isConstOf `Effects.All do return .rfl
+  unless e.isApp && (e.getAppFn'.isConstOf `Effects.All || e.getAppFn'.isConstOf `Trace.All) do return .rfl
 
   let (es, st) ← ExtractLets.extract #[e] |>.run {} |>.run' {} |>.run { givenNames := [] }
   unless st.decls.size > 0 do return .rfl
@@ -406,8 +407,9 @@ partial def evalSymKStep : Grind.GrindTactic :=
         | .letE _ _ _ body _ => getEffectsState body
         | .mdata _ e => getEffectsState e
         | _ =>
-          if e.isApp && e.getAppFn.isConstOf `Effects.All && e.getAppArgs.size == 2 then
-            some e.getAppArgs[1]!
+          if e.isApp && ((e.getAppFn.isConstOf `Effects.All && e.getAppArgs.size == 2) ||
+              (e.getAppFn.isConstOf `Trace.All && e.getAppArgs.size == 5)) then
+            some e.getAppArgs.back!
           else
             none
       -- No more Effects.All in the goal -- return to the user (we might be done,

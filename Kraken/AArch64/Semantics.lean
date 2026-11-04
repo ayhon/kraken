@@ -5,6 +5,7 @@ meta import Kraken.AArch64.Syntax
 import Kraken.Attribute
 public import Kraken.Mem
 meta import Kraken.Mem
+public import Kraken.Trace
 public import Lean.ToExpr
 meta import Lean.Elab.Deriving.ToExpr
 
@@ -168,19 +169,76 @@ structure MachineState where
   data : MachineData
   pc : Int64
 
-inductive Effects
-  | done (a : MachineState)
-  | unimplemented (msg : String)
-  -- loads and stores *outside* the data memory, eg. MMIO, might still affect the data memory:
-  -- for instance, MMIO reads/writes at certain device register addresses might change what
-  -- data memory the process logically owns vs what memory is owned by devices
-  | nonmem_load (dmem : DataMem) (addr : BitVec 64) (w : MemWidth) (ret : w.type → DataMem → Effects)
-  | nonmem_store (dmem : DataMem) (addr : BitVec 64) {w : MemWidth} (v : w.type) (ret: DataMem → Effects)
-  | undefined {α : Type} [NondetSupportingType α] (ret : α → Effects)
-  | require_read_access (addr : BitVec 64) (w : MemWidth) (ok : Unit → Effects)
-  | require_write_access (addr : BitVec 64) (w : MemWidth) (ok : Unit → Effects)
-  | require_exec_access (p: Std.Rco Int64) (ok : Unit → Effects)
-  | unaligned_sp {w : RegWidth} (sp : w.type)
+namespace AArch64Effects
+
+@[kstep] def Unimplemented : Effect := Effect.mkNonrecoverable String
+@[kstep] def UnalignedSp : Effect := Effect.mkNonrecoverable <| (w : RegWidth) × w.type
+
+@[kstep] def NonMemLoad : Effect where
+  In := DataMem × (BitVec 64) × MemWidth
+  Out := fun (_, _, w) => w.type × DataMem
+
+@[kstep] def NonMemStore : Effect where
+  In := DataMem × (BitVec 64) × (w : MemWidth) × w.type
+  Out := fun _ => DataMem
+
+@[kstep] def Undefined : Effect where
+  In := (α : Type) × NondetSupportingType α
+  Out := fun ⟨α, _⟩ => α
+
+@[kstep] def RequireReadAccess : Effect := .mkMark <| BitVec 64 × MemWidth
+@[kstep] def RequireWriteAccess : Effect := .mkMark <| BitVec 64 × MemWidth
+@[kstep] def RequireExecAccess : Effect := .mkMark <| Std.Rco Int64
+
+@[kstep] abbrev All := Unimplemented   ∪ₑ UnalignedSp
+        ∪ₑ NonMemLoad         ∪ₑ NonMemStore
+        ∪ₑ Undefined          ∪ₑ RequireReadAccess
+        ∪ₑ RequireWriteAccess ∪ₑ RequireExecAccess
+
+@[kstep] def All.epost : (val : All.In) → (All.Out val → Prop) → Prop
+  | Effect.Incl.input (a := Unimplemented) _, _
+  | Effect.Incl.input (a := UnalignedSp) _, _
+  | Effect.Incl.input (a := NonMemLoad) _, _
+  | Effect.Incl.input (a := NonMemStore) _, _
+    => False
+  | Effect.Incl.input (a := Undefined) ⟨α, _⟩, contP
+    => ∀ (o : α), contP o
+  | Effect.Incl.input (a := RequireReadAccess) _, contP
+  | Effect.Incl.input (a := RequireWriteAccess) _, contP
+  | Effect.Incl.input (a := RequireExecAccess) _, contP
+    => contP ()
+
+end AArch64Effects
+
+abbrev Effects := Trace AArch64Effects.All MachineState
+
+namespace Effects
+
+@[match_pattern, kstep] def unimplemented (msg : String) (fn : Empty → Effects := nofun) : Effects :=
+  .yield (Effect.Incl.input (a := AArch64Effects.Unimplemented) msg) fn
+
+@[match_pattern, kstep] def unaligned_sp {w : RegWidth} (sp : w.type) (fn : Empty → Effects := nofun) : Effects :=
+  .yield (Effect.Incl.input (a := AArch64Effects.UnalignedSp) ⟨w, sp⟩) fn
+
+-- loads and stores *outside* the data memory, eg. MMIO, might still affect the data memory:
+-- for instance, MMIO reads/writes at certain device register addresses might change what
+-- data memory the process logically owns vs what memory is owned by devices
+@[match_pattern, kstep] def nonmem_load (dmem : DataMem) (addr : BitVec 64) (w : MemWidth) (ret : w.type × DataMem → Effects) : Effects :=
+  .yield (Effect.Incl.input (a := AArch64Effects.NonMemLoad) (dmem, addr, w)) ret
+@[match_pattern, kstep] def nonmem_store (dmem : DataMem) (addr : BitVec 64) {w : MemWidth} (v : w.type) (ret: DataMem → Effects) : Effects :=
+  .yield (Effect.Incl.input (a := AArch64Effects.NonMemStore) ⟨dmem, addr, w, v⟩) ret
+
+@[match_pattern, kstep] def undefined {α : Type} [ι : NondetSupportingType α] (ret : α → Effects) : Effects :=
+  .yield (Effect.Incl.input (a := AArch64Effects.Undefined) ⟨α, ι⟩) ret
+
+@[match_pattern, kstep] def require_read_access (addr : BitVec 64) (w : MemWidth) (ok : Unit → Effects) : Effects :=
+  .yield (Effect.Incl.input (a := AArch64Effects.RequireReadAccess) ⟨addr, w⟩) ok
+@[match_pattern, kstep] def require_write_access (addr : BitVec 64) (w : MemWidth) (ok : Unit → Effects) : Effects :=
+  .yield (Effect.Incl.input (a := AArch64Effects.RequireWriteAccess) ⟨addr, w⟩) ok
+@[match_pattern, kstep] def require_exec_access (p: Std.Rco Int64) (ok : Unit → Effects) : Effects :=
+  .yield (Effect.Incl.input (a := AArch64Effects.RequireExecAccess) p) ok
+
+end Effects
 export Effects (unimplemented nonmem_load nonmem_store undefined require_read_access require_write_access require_exec_access)
 
 -- the unused `Std.Rco Int64` argument and the unmodified `MachineData` return
@@ -211,7 +269,7 @@ def MachineData.load
   require_read_access addr w (fun _unit =>
     match Mem.loadInt s.dmem addr w.bytes with
     | .some i => ret (.ofInt _ i) s
-    | .none => nonmem_load s.dmem addr w (fun v dmem => ret v { s with dmem }))
+    | .none => nonmem_load s.dmem addr w (fun (v, dmem) => ret v { s with dmem }))
 
 def MachineData.store (s : MachineData) (addr : BitVec 64) {w : MemWidth} (v : w.type) (ret: MachineData → Effects) : Effects :=
   require_write_access addr w (fun _unit =>
@@ -983,14 +1041,14 @@ where
   handleEffects es :=
     match es with
     | .done s => eval e s until_
-    | .unimplemented msg => .error msg
+    | .unimplemented msg _ => .error msg
     | .require_read_access _ _ ok => handleEffects (ok ())
     | .require_write_access _ _ ok => handleEffects (ok ())
     | .require_exec_access _ ok => handleEffects (ok ())
     | .nonmem_load _ addr _ _ => .error s!"Load at unmapped address {repr addr}"
     | .nonmem_store _ addr _ _ => .error s!"Store at unmapped address {repr addr}"
-    | .unaligned_sp sp => .error s!"SP={sp} (is not 16-byte aligned)"
-    | @Effects.undefined _ t cont => handleEffects (cont (t.from_hash (hash s.1.regs)))
+    | .unaligned_sp sp _ => .error s!"SP={sp} (is not 16-byte aligned)"
+    | .undefined (ι := t) cont => handleEffects (cont (t.from_hash (hash s.1.regs)))
 
 def Directive.fakeSize (d : Directive) : Nat :=
   match d with

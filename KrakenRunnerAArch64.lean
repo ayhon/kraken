@@ -98,7 +98,7 @@ instance : StatusFlagBits StatusFlags where
 partial def evalEffects (h : UInt64) (sawUndef : Bool) : Effects → Option (MachineData × Bool)
   | .done st => some (st.data, sawUndef)
   | .require_read_access _ _ ok | .require_write_access _ _ ok | .require_exec_access _ ok => evalEffects h sawUndef (ok ())
-  | @Effects.undefined _ t cont => evalEffects h true (cont (t.from_hash h))
+  | .undefined (ι := t) cont => evalEffects h true (cont (t.from_hash h))
   | _ => none
 
 instance {w} : CoeOut (Operation w) Instr := ⟨(⟨w, ·⟩)⟩
