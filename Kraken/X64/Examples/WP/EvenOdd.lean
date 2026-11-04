@@ -145,7 +145,8 @@ theorem ret_exit {p : Program} {H : Embedding p} {done exit : MachineState → P
     Loop p H done exit s₀ ⟨t, Host.addrOf (H.start + i)⟩ := by
   refine loop_step hpos hi fun P n j _ hj => ?_
   obtain ⟨v, hv, hra⟩ := hload
-  simp only [Directive.interp, Instr.interp, Operation.interp, MachineData.load, hv, Effects.All, hra]
+  simp only [Directive.interp, Instr.interp, Operation.interp, MachineData.load, hv, Effects.All,
+    Trace.All, X64Effects.All.epost, Effect.Incl.input, require_exec_access, require_read_access, hra]
   refine hj ra _ (stepOut_of_not_below (by stk) ?_)
   rwa [Program.ContinueAtOwnLabel, ite_eq_right fun h => h.2 (by stk)]
 
@@ -162,7 +163,8 @@ theorem call_step {p q : Program} {H : Embedding p} {Hq : Embedding q} {done exi
   refine loop_step hpos hi fun P n j _ hj => ?_
   obtain ⟨v, hv⟩ := Option.isSome_iff_exists.mp hmapped
   simp only [Directive.interp, Instr.interp, Operation.interp, RelRegOrMem.interp, ConstExpr.interp,
-    MachineData.store, hv, Effects.All]
+    MachineData.store, hv, Effects.All, Trace.All, X64Effects.All.epost, Effect.Incl.input,
+    require_exec_access, require_write_access]
   rw [Int64.ofBitVec_toBitVec, Int64.add_comm, Int64.sub_add_cancel]
   refine hj (label g) (t.pushRa _) ?_
   have hk := prog_at (H := H) hi
@@ -178,7 +180,8 @@ def body (f z g : Label) (c : Int64) : Program :=
 
 local macro "run_step" : tactic =>
   `(tactic| simp only [Directive.interp, Instr.interp, Operation.interp, Operand.interp, RegOrMem.interp,
-      ConstExpr.interp, MachineData.set, MachineData.setReg, get_low64, Reg64s.set, Effects.All, ite_true])
+      ConstExpr.interp, MachineData.set, MachineData.setReg, get_low64, Reg64s.set, Effects.All,
+      Trace.All, X64Effects.All.epost, Effect.Incl.input, require_exec_access, undefined, ite_true])
 
 theorem body_spec (hlab : ∀ i l, Host.prog[i]? = some (.label l) → label l = Host.addrOf i)
     {f z g : Label} {c : Int64} {r rq : Nat} {q : Program} {Hq : Embedding q}

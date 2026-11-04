@@ -150,11 +150,11 @@ public theorem Program.wp_single {d : Directive} {done exit : MachineState → P
   have hdk : Host.prog[h.start]? = some d := h.isInfixAt.cons.1
   have hend : h.endAddr = Host.addrOf (h.start + 1) := rfl
   rcases Nat.eq_zero_or_pos (Kraken.Layout.size Directive h.start) with h0 | hz
-  · have hq := (Host.inert_of_getElem? hdk h0 s₀ _ (fun s₁ => .done { data := s₁, pc := 0 })
-      (fun _ s₁ => .done { data := s₁, pc := 1 })
+  · have hq := (Host.inert_of_getElem? hdk h0 s₀ _ (fun s₁ => .fallthrough { data := s₁, pc := 0 })
+      (fun _ s₁ => .jump { data := s₁, pc := 1 })
       (fun st => st.pc = 0 → done { data := st.data, pc := h.endAddr })).mp
       (@hw (fun st => st.pc = 0 → done { data := st.data, pc := h.endAddr }) _ _ (fun _ hq _ => hq)
-        fun _ _ _ h => by simp at h)
+        fun _ _ _ h => nomatch h)
     have ha : h.startAddr = h.endAddr := by grind
     refine While.stop (by simp [ha]) ?_
     rw [ha]

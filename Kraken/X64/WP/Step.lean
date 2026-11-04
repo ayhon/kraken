@@ -45,10 +45,10 @@ public theorem all [Layout] {next jump post : MachineState → Prop} (h : e.Step
     (hn : ∀ u, next u → post u) (hj : ∀ u, jump u → post u) : step1 e st post := by
   unfold step1 Executable.step
   change (@Directives.interp e.labels (e.directivesAtAddress st.pc) st.data st.pc
-    (fun a s => Effects.done { data := s, pc := a })
-    (fun a s => Effects.done { data := s, pc := a })).All post
+    (fun a s => .fallthrough { data := s, pc := a })
+    (fun a s => .jump { data := s, pc := a })).All post
   rw [@Directives.interp_ret_congr e.labels _ _ _ _
-    (fun _ s => Effects.done { data := s, pc := e.nextAddr st.pc }) _ (fun _ => rfl)]
+    (fun _ s => .fallthrough { data := s, pc := e.nextAddr st.pc }) _ (fun _ => rfl)]
   exact h _ _ _ (fun _ h => hn _ h) (fun _ h => hj _ h)
 
 open Lean.Order in
