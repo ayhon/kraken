@@ -10,24 +10,21 @@ theorem StepIn.and {next₁ next₂ jump₁ jump₂ : MachineState → Prop} (h�
     (h₂ : e.StepIn next₂ jump₂ st₀) :
     e.StepIn (fun u => next₁ u ∧ next₂ u) (fun u => jump₁ u ∧ jump₂ u) st₀ := by
   intro P r j hr hj
-  let probe : Prop → Effects := fun c => if c then .done st₀ else .unimplemented ""
-  have hprobe : ∀ c, (probe c).All (fun _ => True) ↔ c := fun c => by
-    by_cases hc : c <;> simp [probe, hc, Effects.All]
-  have t₁ := @h₁ (fun _ => True) (fun s => probe (next₁ { data := s, pc := e.nextAddr st₀.pc }))
-    (fun u => probe (jump₁ u))
-    (fun _ h => (hprobe _).mpr h) (fun _ h => (hprobe _).mpr h)
-  have t₂ := @h₂ (fun _ => True) (fun s => probe (next₂ { data := s, pc := e.nextAddr st₀.pc }))
-    (fun u => probe (jump₂ u))
-    (fun _ h => (hprobe _).mpr h) (fun _ h => (hprobe _).mpr h)
-  refine @Directives.interp_natural e.labels (e.directivesAtAddress st₀.pc) st₀.data st₀.pc _ _ P
-    (Sum.elim (fun x => probe (next₁ { data := x.2, pc := e.nextAddr st₀.pc }))
-      (fun x => probe (jump₁ { data := x.2, pc := x.1 })))
-    (Sum.elim (fun x => probe (next₂ { data := x.2, pc := e.nextAddr st₀.pc }))
-      (fun x => probe (jump₂ { data := x.2, pc := x.1 })))
-    (Sum.elim (fun x => r x.2) (fun x => j { data := x.2, pc := x.1 })) ?_ t₁ t₂
-  rintro (⟨a, s⟩ | ⟨a, s⟩) e₁ e₂
-  · exact hr _ ⟨(hprobe _).mp e₁, (hprobe _).mp e₂⟩
-  · exact hj _ ⟨(hprobe _).mp e₁, (hprobe _).mp e₂⟩
+  let probe (c : Prop) : Effects :=
+    if c then .fallthrough st₀ else .unimplemented ""
+  have hprobe (c : Prop) : (probe c).All (fun _ => True) ↔ c := by
+    by_cases hc : c <;>
+      simp [probe, hc, Effects.All, Trace.All, X64Effects.All.epost,
+        Effect.Incl.input, unimplemented]
+  have run₁ := h₁ (fun _ => True) (fun s => probe (next₁ ⟨s, e.nextAddr st₀.pc⟩))
+    (fun u => probe (jump₁ u)) (fun _ => (hprobe _).mpr) (fun _ => (hprobe _).mpr)
+  have run₂ := h₂ (fun _ => True) (fun s => probe (next₂ ⟨s, e.nextAddr st₀.pc⟩))
+    (fun u => probe (jump₂ u)) (fun _ => (hprobe _).mpr) (fun _ => (hprobe _).mpr)
+  letI := e.labels
+  rw [Effects.All, Directives.interp_eq_bind, Trace.All_bind] at run₁ run₂ ⊢
+  exact Trace.All.imp₂ X64Effects.All.epost_imp₂ (fun
+    | (.fallthrough, st) => fun e₁ e₂ => hr st.data ⟨(hprobe _).mp e₁, (hprobe _).mp e₂⟩
+    | (.jump, st) => fun e₁ e₂ => hj st ⟨(hprobe _).mp e₁, (hprobe _).mp e₂⟩) _ run₁ run₂
 
 theorem StepOut.and_map {β : Type} (o : Int64 → Option β)
     {g₁ g₂ g : β → (MachineState → Prop) → MachineData → Prop}
