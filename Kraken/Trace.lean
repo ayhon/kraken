@@ -40,12 +40,29 @@ attribute [match_pattern, kstep] Incl.input
 
 end Effect
 
+inductive Exit where
+  | fallthrough
+  | jump
+  deriving Repr, BEq, DecidableEq, Inhabited
+
 variable (eff : Effect) (Result : Type _) in
 inductive Trace where
   | done (res : Result)
   | yield (value : eff.In) (cont : eff.Out value → Trace)
 
 namespace Trace
+
+@[match_pattern, kstep] abbrev exit {eff : Effect} {Result : Type _} (res : Exit × Result) :
+    Trace eff (Exit × Result) :=
+  .done res
+
+@[match_pattern, kstep] abbrev fallthrough {eff : Effect} {Result : Type _} (res : Result) :
+    Trace eff (Exit × Result) :=
+  .exit (.fallthrough, res)
+
+@[match_pattern, kstep] abbrev jump {eff : Effect} {Result : Type _} (res : Result) :
+    Trace eff (Exit × Result) :=
+  .exit (.jump, res)
 
 @[kstep] protected def map.{u, v, w} {eff : Effect.{u}} {α : Type v} {β : Type w}
     (f : α → β) : Trace eff α → Trace eff β
