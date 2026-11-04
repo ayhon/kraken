@@ -208,19 +208,11 @@ namespace AArch64Effects
   | Effect.Incl.input (a := RequireExecAccess) _, contP
     => contP ()
 
-@[kstep] def All.Handlers (post : MachineState → Prop) :
-    Trace.All.Handlers All MachineState where
-  post := post
-  epost := All.epost
-
 end AArch64Effects
 
 abbrev Effects := Trace AArch64Effects.All MachineState
 
 namespace Effects
-
-@[match_pattern, kstep] abbrev done (res : MachineState) : Effects :=
-  .fallthrough res
 
 @[match_pattern, kstep] def unimplemented (msg : String) (fn : Empty → Effects := nofun) : Effects :=
   .yield (Effect.Incl.input (a := AArch64Effects.Unimplemented) msg) fn
@@ -1048,7 +1040,7 @@ partial def Executable.eval (e : Executable) (s : MachineState) (until_ : Machin
 where
   handleEffects es :=
     match es with
-    | .fallthrough s | .jump s => eval e s until_
+    | .done s => eval e s until_
     | .unimplemented msg _ => .error msg
     | .require_read_access _ _ ok => handleEffects (ok ())
     | .require_write_access _ _ ok => handleEffects (ok ())
