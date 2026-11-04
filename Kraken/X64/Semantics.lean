@@ -885,7 +885,7 @@ partial def Executable.eval (e : Executable) (s : MachineState) (until_ : Machin
 where
   handleEffects es :=
     match es with
-    | .exit (_, s) => eval e s until_
+    | .done (_, s) => eval e s until_
     | .unimplemented msg _ => .error msg
     | .gp_unaligned addr w _ => .error s!"#GP: Memory op at {repr addr} did not have mandatory alignment of {w}"
     | .require_read_access _ _ ok => handleEffects (ok ())

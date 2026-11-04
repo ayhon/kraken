@@ -93,7 +93,7 @@ instance : StatusFlagBits StatusFlags where
 -- Runs `Effects` to completion, resolving every `undefined` choice with `h`. Also returns
 -- whether any `undefined` choice was made.
 partial def evalEffects (h : UInt64) (sawUndef : Bool) : Effects → Option (MachineData × Bool)
-  | .exit (_, st) => some (st.data, sawUndef)
+  | .done (_, st) => some (st.data, sawUndef)
   | .require_read_access _ _ ok | .require_write_access _ _ ok | .require_exec_access _ ok => evalEffects h sawUndef (ok ())
   | .undefined (ι := t) cont => evalEffects h true (cont (t.from_hash h))
   | _ => none

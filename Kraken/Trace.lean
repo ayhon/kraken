@@ -52,17 +52,13 @@ inductive Trace where
 
 namespace Trace
 
-@[match_pattern, kstep] abbrev exit {eff : Effect} {Result : Type _} (res : Exit × Result) :
-    Trace eff (Exit × Result) :=
-  .done res
-
 @[match_pattern, kstep] abbrev fallthrough {eff : Effect} {Result : Type _} (res : Result) :
     Trace eff (Exit × Result) :=
-  .exit (.fallthrough, res)
+  .done (.fallthrough, res)
 
 @[match_pattern, kstep] abbrev jump {eff : Effect} {Result : Type _} (res : Result) :
     Trace eff (Exit × Result) :=
-  .exit (.jump, res)
+  .done (.jump, res)
 
 @[kstep] protected def map.{u, v, w} {eff : Effect.{u}} {α : Type v} {β : Type w}
     (f : α → β) : Trace eff α → Trace eff β
