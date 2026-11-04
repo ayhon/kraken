@@ -408,7 +408,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
         | .mdata _ e => getEffectsState e
         | _ =>
           if e.isApp && ((e.getAppFn.isConstOf `Effects.All && e.getAppArgs.size == 2) ||
-              (e.getAppFn.isConstOf `Trace.All && e.getAppArgs.size == 4)) then
+              (e.getAppFn.isConstOf `Trace.All && e.getAppArgs.size == 5)) then
             some e.getAppArgs.back!
           else
             none
