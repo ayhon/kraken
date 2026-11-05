@@ -47,13 +47,13 @@ def swap : Program := parseAArch64("
   eor x1, x0, x1
   eor x0, x0, x1")
 
-theorem swap_correct [layout : Layout] (hwf : (layout swap).WellFormed) (d : MachineData) :
-    Eventually (step1 (layout swap))
+theorem swap_correct [layout : WellFormedLayout swap] (d : MachineData) :
+    Eventually (step1 swap.toExecutable)
       (fun s' =>
         s'.1.regs.getRegOrZr .X0 = d.regs.getRegOrZr .X1 ∧
         s'.1.regs.getRegOrZr .X1 = d.regs.getRegOrZr .X0)
       ⟨d, layout.start⟩ := by
-  apply eventually_step (layout swap) hwf
+  apply eventually_step swap
   kprologue swap with d
   sym => kstep; tactic =>
   grind
@@ -65,11 +65,11 @@ def arith_shift : Program := parseAArch64("
   sub x3, x2, x0
 ")
 
-theorem arith_shift_correct [layout : Layout] (hwf : (layout arith_shift).WellFormed) (d : MachineData) :
-    Eventually (step1 (layout arith_shift))
+theorem arith_shift_correct [layout : WellFormedLayout arith_shift] (d : MachineData) :
+    Eventually (step1 arith_shift.toExecutable)
       (fun s' => s'.1.regs.getRegOrZr .X3 = 3 * (d.regs.getRegOrZr .X1 + 42))
       ⟨d, layout.start⟩ := by
-  apply eventually_step (layout arith_shift) hwf
+  apply eventually_step arith_shift
   kprologue arith_shift with d
   sym => kstep; tactic =>
   simp (config := { zetaDelta := true }) only [show BitVec.ofInt 64 (Int64.toInt 42) = 42#64 from rfl,
@@ -85,11 +85,11 @@ start:
   mov x1, #42
 ")
 
-theorem p4_correct [layout : Layout] (hwf : (layout controlflow).WellFormed) (d : MachineData) :
-    Eventually (step1 (layout controlflow))
+theorem p4_correct [layout : WellFormedLayout controlflow] (d : MachineData) :
+    Eventually (step1 controlflow.toExecutable)
       (fun s' => s'.1.regs.X1 = 42)
       ⟨d, layout.start⟩ := by
-  apply eventually_step_cps (layout controlflow) hwf
+  apply eventually_step_cps controlflow
   kprologue controlflow with d
   sym => kstep; tactic =>
   rename_i v v1
@@ -111,17 +111,17 @@ def move_2_regs_to_heap : Program := parseAArch64("
     ldr x4, [x2, #8]
 ")
 
-theorem move_2_regs_to_heap_correct [layout : Layout] (hwf : (layout move_2_regs_to_heap).WellFormed) (s₀ : MachineData)
+theorem move_2_regs_to_heap_correct [layout : WellFormedLayout move_2_regs_to_heap] (s₀ : MachineData)
     (v1 v2 : UInt64)
     (R : DataMem → Prop)
     (h_mem : s₀.dmem =⋆ Eq (v1.At s₀.regs.X2.toBitVec) ⋆ Eq (v2.At (s₀.regs.X2.toBitVec + 8#64)) ⋆ R) :
-    Eventually (step1 (layout move_2_regs_to_heap))
+    Eventually (step1 move_2_regs_to_heap.toExecutable)
       (fun s' =>
         s'.1.regs.X3 = s₀.regs.X0 ∧
         s'.1.regs.X4 = s₀.regs.X1 ∧
         s'.1.regs.X2 = s₀.regs.X2)
       ⟨s₀, layout.start⟩ := by
-  apply eventually_step_cps (layout move_2_regs_to_heap) hwf
+  apply eventually_step_cps move_2_regs_to_heap
   kprologue move_2_regs_to_heap with s₀
 
   have h_bs1 : v1.toBytes.length = 8 := UInt64.toBytes_length v1
@@ -159,13 +159,13 @@ def reg_offset_example : Program := parseAArch64("
     ldr x3, [x1, x2, lsl #3]
 ")
 
-theorem reg_offset_example_correct [layout : Layout] (hwf : (layout reg_offset_example).WellFormed) (s₀ : MachineData)
+theorem reg_offset_example_correct [layout : WellFormedLayout reg_offset_example] (s₀ : MachineData)
     (v : UInt64) (R : DataMem → Prop)
     (h_mem : s₀.dmem =⋆ Eq (v.At (s₀.regs.X1.toBitVec + BitVec.ofInt 64 (s₀.regs.X2.toBitVec.toNat <<< 3))) ⋆ R) :
-    Eventually (step1 (layout reg_offset_example))
+    Eventually (step1 reg_offset_example.toExecutable)
       (fun s' => s'.1.regs.X3 = 42)
       ⟨s₀, layout.start⟩ := by
-  apply eventually_step_cps (layout reg_offset_example) hwf
+  apply eventually_step_cps reg_offset_example
   kprologue reg_offset_example with s₀
   have h_bs : v.toBytes.length = 8 := UInt64.toBytes_length v
   simp at h_mem

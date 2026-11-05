@@ -882,7 +882,8 @@ def Directives.interp [Labels]
     (directive.interp s (.mk pc (pc+.ofNat sz)) .next (fun a s' => .done ⟨s', a⟩)).bind
       (fun s => interp ds s (pc+.ofNat sz))
 
-abbrev Layout := Kraken.Layout Instr
+abbrev Layout (prog : Program) := Kraken.Layout prog
+abbrev WellFormedLayout (prog : Program) := Kraken.WellFormedLayout prog
 
 @[reducible]
 def Executable.labels (e : Executable) : Labels :=
@@ -924,10 +925,10 @@ def Directive.fakeSize (hashOfProgram : UInt64) (d : Directive) : Nat :=
 def Program.fakeLayout (prog : Program) : Executable :=
   let : Inhabited Directive := .mk (.byteArray (.mk #[]))
   let h := hash prog;
-  let layout : Layout := { start := h.toInt64<<<16, size i := prog[i]!.fakeSize h }
-  layout prog
+  let layout : Layout prog := { start := h.toInt64<<<16, size i := prog[i]!.fakeSize h }
+  layout.apply prog
 
-abbrev eval [layout : Layout] (prog : Program) := Executable.eval (layout prog)
+abbrev eval (prog : Program) [layout : Layout prog] := Executable.eval prog.toExecutable
 
 /-- info: Except.ok 42 -/
 #guard_msgs in

@@ -7,9 +7,9 @@ import Kraken.Tactics
 private def kprologueTestProgram : Program := []
 
 -- The hygienic state alias must not capture an existing `ss`.
-example [layout : Layout] (hwf : (layout kprologueTestProgram).WellFormed) (P : Prop) (ss : Nat) (s : MachineData) (hP : P) :
-    Eventually (step1 (layout kprologueTestProgram)) (fun _ => P) ⟨s, layout.start⟩ := by
-  apply eventually_step (layout kprologueTestProgram) hwf
+example [layout : WellFormedLayout kprologueTestProgram] (P : Prop) (ss : Nat) (s : MachineData) (hP : P) :
+    Eventually (step1 kprologueTestProgram.toExecutable) (fun _ => P) ⟨s, layout.start⟩ := by
+  apply eventually_step kprologueTestProgram
   kprologue kprologueTestProgram with s
   have _ : Nat := ss
   have _ : UInt64 := X30
@@ -22,7 +22,7 @@ example [layout : Layout] (hwf : (layout kprologueTestProgram).WellFormed) (P : 
 error: kprologue: refusing to shadow existing locals: X0
 -/
 #guard_msgs in
-example [layout : Layout] (hwf : (layout kprologueTestProgram).WellFormed) (X0 : UInt64) (s : MachineData) :
-    Eventually (step1 (layout kprologueTestProgram)) (fun _ => True) ⟨s, layout.start⟩ := by
-  apply eventually_step (layout kprologueTestProgram) hwf
+example [layout : WellFormedLayout kprologueTestProgram] (X0 : UInt64) (s : MachineData) :
+    Eventually (step1 kprologueTestProgram.toExecutable) (fun _ => True) ⟨s, layout.start⟩ := by
+  apply eventually_step kprologueTestProgram
   kprologue kprologueTestProgram with s

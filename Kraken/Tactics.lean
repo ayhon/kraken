@@ -89,8 +89,9 @@ elab_rules : tactic
          dsimp only
          change ($effectsAllId:ident _ (@$directivesInterpId:ident ($execLabelsId:ident _) _ ss _))
          obtain $statePat:rcasesPat := $s
-         delta $p
          rw [Executable.directivesFromStart]
+         -- ↓ NOTE: To prevent `p` from being unfolded elsewhere
+         conv in List.mapIdx _ $p => arg 2; unfold $p
          simp [List.mapIdx, List.mapIdx.go])))
 
 --------------------------------------------------------------------------------

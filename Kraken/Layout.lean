@@ -33,23 +33,25 @@ structure Executable (Instr : Type) where
   program : List (Sized (Directive Instr))
 
 -- JP: why is `size` not `Directive → Nat`?
-class Layout (Instr : Type) where
+class Layout {Instr : Type} (p : Program Instr) where
   start : Int64
   size : Nat → Nat
 
 variable {Instr : Type}
 
-def Layout.apply (l : Layout Instr) (prog : Program Instr) : Executable Instr :=
+def Program.size (p : Program Instr) [Layout p] := p.mapIdx (fun idx _ => Layout.size p idx) |>.sum
+
+class Layout.IsWellFormed (p : Program Instr) [Layout p] where
+  no_overflow : p.size < 2^64
+
+class abbrev WellFormedLayout (p : Program Instr) := Layout p, Layout.IsWellFormed p
+
+def Layout.apply (prog : Program Instr) (l : Layout prog) : Executable Instr :=
   {startAddr := l.start, program := prog.mapIdx (fun i directive => {directive, size := l.size i})}
 
--- NOTE: We write `List (Kraken.Directive Instr)` here, and not `Kraken.Program Instr`, because architecture
--- specific `Program` types are written as `List Directive` which desugar to `List (Kraken.Directive Instr)`,
--- and so otherwise the typeclass synthesis algorithm would not find this instance.
--- Architecture specific programs are written as `List Directive` for architecture-specific `Directive`
--- instead of `Kraken.Directive Instr` so that `ls[i].foo` searches for `Directive.foo` first, instead of
--- going directly to `Kraken.Directive.foo` (which contains less information)
-instance : CoeFun (Layout Instr) (fun _ => List (Directive Instr) → Executable Instr) where
-  coe := Layout.apply
+abbrev Program.toExecutable (prog : Program Instr) [l : Layout prog] := l.apply prog
+
+abbrev _root_.List.toExecutable (prog : Program Instr) [l : Layout prog] := l.apply prog
 
 structure Addressable (Directive : Type) extends Sized Directive where (addr : Int64)
 
@@ -80,8 +82,8 @@ theorem Executable.withAddresses_dropWhile_start {Instr : Type} (program : List 
       Executable.withAddresses {startAddr, program} := by
   cases program <;> grind [Executable.withAddresses, List.dropWhile_cons, List.dropWhile_nil]
 
-theorem Executable.directivesFromStart {Instr : Type} [layout : Layout Instr] (prog : Program Instr) :
-    (layout prog).directivesFromAddress layout.start =
+theorem Executable.directivesFromStart {Instr : Type} (prog : Program Instr) [layout : Layout prog] :
+    prog.toExecutable.directivesFromAddress layout.start =
       prog.mapIdx (fun i directive => {directive, size := layout.size i}) := by
   grind [Executable.withAddresses_dropWhile_start, Executable.withAddresses_map_snd, Executable.directivesFromAddress, Layout.apply]
 
@@ -92,16 +94,12 @@ theorem directivesAtFromPrefix {Instr : Type} (e: Executable Instr) (a: Int64):
   rw [← List.map_append]
   rw [List.takeWhile_append_dropWhile]
 
-/-- Total byte size of the executable. -/
-def Executable.size {Instr : Type} (e : Executable Instr) : Nat :=
-  (e.program.map (·.size)).sum
-
-/-- An executable is well-formed if its total byte size fits in the 64-bit address space. -/
-def Executable.WellFormed {Instr : Type} (e : Executable Instr) : Prop :=
-  e.size < UInt64.size
-
-instance {Instr : Type} (e : Executable Instr) : Decidable e.WellFormed :=
-  inferInstanceAs (Decidable (e.size < UInt64.size))
+theorem Program.map_size_toExecutable_eq (p : Program Instr) [Layout p] :
+    (p.toExecutable.program.map (·.size)).sum = p.size := by
+  dsimp [Program.toExecutable, Layout.apply, Program.size]
+  congr 1
+  generalize (Layout.size p) = sz
+  induction p generalizing sz <;> simp [List.mapIdx_cons, *]
 
 @[grind hom] theorem Int64.toBitVec_ofNat_grind (a : Nat) :
     (Int64.ofNat a).toBitVec = OfNat.ofNat a := by
@@ -188,15 +186,20 @@ private theorem withAddresses_dropWhile_WellFormed {Instr : Type}
         simp only [List.dropWhile_cons, ne_eq, ha, not_false_eq_true, decide_true, ↓reduceIte]
         exact hpos_take
 
-theorem Executable.WellFormed.directivesFromAddress_split {Instr : Type}
-    {e : Executable Instr} (hwf : e.WellFormed) (pc : Int64) :
+theorem Executable.directivesFromAddress_split {Instr : Type}
+    (prog : Program Instr) [WellFormedLayout prog] (pc : Int64) :
+    let e := prog.toExecutable
     let at_pc := e.directivesAtAddress pc
     let pc' := at_pc.foldl (fun p d => p + .ofNat d.size) pc
     e.directivesFromAddress pc = at_pc ∨
     (e.directivesFromAddress pc = at_pc ++ e.directivesFromAddress pc' ∧
      (e.withAddresses.dropWhile (·.addr ≠ pc')).length <
        (e.withAddresses.dropWhile (·.addr ≠ pc)).length) := by
-  rcases e with ⟨startAddr, program⟩
+  have hwf : (prog.toExecutable.program.map (·.size)).sum < UInt64.size := by
+    rw [Program.map_size_toExecutable_eq]
+    exact Layout.IsWellFormed.no_overflow
+  rcases h_e : prog.toExecutable with ⟨startAddr, program⟩
+  rw [h_e] at hwf
   dsimp only
   have h_prefix := directivesAtFromPrefix {startAddr, program} pc
   dsimp only at h_prefix
@@ -257,6 +260,23 @@ theorem Executable.sizeBefore_mono {Instr : Type} (e : Executable Instr) {j k : 
 theorem Executable.addrOf_succ {Instr : Type} (e : Executable Instr) {n : Nat} {c : Sized (Directive Instr)}
     (hc : e.program[n]? = some c) : e.addrOf (n + 1) = e.addrOf n + .ofNat c.size := by
   grind [addrOf]
+
+theorem Executable.sizeBefore_le {Instr : Type} (e : Executable Instr) (n : Nat) :
+    e.sizeBefore n ≤ (e.program.map (·.size)).sum := by
+  simpa [sizeBefore, List.take_of_length_le (Nat.le_max_right n e.program.length)] using
+    e.sizeBefore_mono (Nat.le_max_left n e.program.length)
+
+theorem Program.sizeBefore_lt {Instr : Type} (prog : Program Instr) [WellFormedLayout prog] (n : Nat) :
+    prog.toExecutable.sizeBefore n < 2^64 :=
+  Nat.lt_of_le_of_lt (prog.toExecutable.sizeBefore_le n)
+    (Program.map_size_toExecutable_eq prog ▸ Layout.IsWellFormed.no_overflow)
+
+theorem Program.sizeBefore_eq_of_addrOf_eq {Instr : Type} (prog : Program Instr) [WellFormedLayout prog]
+    {j k : Nat} (h : prog.toExecutable.addrOf j = prog.toExecutable.addrOf k) :
+    prog.toExecutable.sizeBefore j = prog.toExecutable.sizeBefore k := by
+  have hj := Program.sizeBefore_lt prog j
+  have hk := Program.sizeBefore_lt prog k
+  grind [Executable.addrOf]
 
 theorem Executable.getElem?_withAddresses_mk {Instr : Type} :
     ∀ (program : List (Sized (Directive Instr))) (startAddr : Int64) (k : Nat),
