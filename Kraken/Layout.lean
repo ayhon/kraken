@@ -39,10 +39,19 @@ class Layout {Instr : Type} (p : Program Instr) where
 
 variable {Instr : Type}
 
-def Program.size (p : Program Instr) [Layout p] := p.mapIdx (fun idx _ => Layout.size p idx) |>.sum
+def Program.size (p : Program Instr) [layout : Layout p] := p.mapIdx (fun idx _ => Layout.size p idx) |>.sum
 
+-- FIXME: Only counts inner labels! Those refered to by the program are not considered.
+-- But since `Instr`  here is generic, we can't provide the function now. A bit of a bummer,
+-- we would like to state well-formedness as a generic condition.
+def Program.labels (p : Program Instr) : List Label := p.filterMap fun
+  | .label l => l
+  | _ => none
+
+-- NOTE: Maybe this should not be a property on `Layout`, but on `Program`...
 class Layout.IsWellFormed (p : Program Instr) [Layout p] where
   no_overflow : p.size < 2^64
+  unique_labels : p.labels.Nodup
 
 class abbrev WellFormedLayout (p : Program Instr) := Layout p, Layout.IsWellFormed p
 
@@ -52,6 +61,38 @@ def Layout.apply (prog : Program Instr) (l : Layout prog) : Executable Instr :=
 abbrev Program.toExecutable (prog : Program Instr) [l : Layout prog] := l.apply prog
 
 abbrev _root_.List.toExecutable (prog : Program Instr) [l : Layout prog] := l.apply prog
+
+@[instance_reducible]
+def Layout.drop (p₁ : Program Instr) {p₂} [l : Layout (p₁ ++ p₂)] : Layout p₂ where
+  start := l.start + .ofNat (p₁.mapIdx (fun i _ => l.size i) |>.sum)
+  size i := l.size (i + p₁.length)
+
+@[instance_reducible]
+def Layout.take (p₁ : Program Instr) {p₂} [l : Layout (p₁ ++ p₂)] : Layout p₁ where
+  start := l.start
+  size i := l.size i
+
+theorem Program.size_append (p₁ p₂ : Program Instr) [layout : Layout (p₁ ++ p₂)] :
+    letI := layout.take p₁
+    letI := layout.drop p₁
+    (p₁ ++ p₂).size = p₁.size + p₂.size
+    := by
+  simp only [size, Layout.size]
+  grind
+
+@[instance_reducible]
+nonrec def WellFormedLayout.drop (p₁ : Program Instr) {p₂} [l : WellFormedLayout (p₁ ++ p₂)] :
+    WellFormedLayout p₂ := {l.drop p₁ with
+    no_overflow := Nat.lt_of_add_left_lt <| Program.size_append (layout := l.toLayout) ▸ l.no_overflow
+    unique_labels := by grind [Program.labels, l.unique_labels]
+  }
+
+@[instance_reducible]
+nonrec def WellFormedLayout.take (p₁ : Program Instr) {p₂} [l : WellFormedLayout (p₁ ++ p₂)] :
+    WellFormedLayout p₁ := {l.take p₁ with
+    no_overflow := Nat.lt_of_add_right_lt <| Program.size_append (layout := l.toLayout) ▸ l.no_overflow
+    unique_labels := by grind [Program.labels, l.unique_labels]
+  }
 
 structure Addressable (Directive : Type) extends Sized Directive where (addr : Int64)
 

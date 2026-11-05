@@ -872,6 +872,7 @@ def Instr.interp [Labels]
   match d with
   | .label _ => next s
   | .instr i => i.interp s p next jmp
+  | .byteArray .empty => next s
   | .byteArray _ => .unimplemented s!"Unimplemented: execution reached data block at {p.1}"
 
 def Directives.interp [Labels]

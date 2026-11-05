@@ -113,3 +113,23 @@ theorem eventually_step_cps (prog : Program) [WellFormedLayout prog]
   intro h
   exact eventually_trans (step1 prog.toExecutable) (fun mid => Eventually (step1 prog.toExecutable) post mid) post st
     (eventually_step prog st _ h) (fun _ => id)
+
+variable (p₁ p₂ : Program) [layout : Kraken.WellFormedLayout (p₁ ++ p₂)]
+variable (zero_inert : ∀ i : Fin (p₁ ++ p₂).length,
+  letI : Labels := { label l := ((p₁ ++ p₂).toExecutable.withAddresses.findSome?
+      (fun {directive, addr, ..} => if directive = .label l then .some addr else .none)).getD (-1) }
+  layout.size i = 0 → ∀ s p next jump post, ((p₁ ++ p₂)[i].interp s p next jump).All post = (next s).All post)
+
+theorem Eventually.prepend
+  (post : MachineState → Prop) (init : MachineState)
+  (h : letI := layout.drop p₁
+       Eventually (step1 p₂.toExecutable) post init) :
+    Eventually (step1 (p₁ ++ p₂).toExecutable) post init := by
+  sorry
+
+theorem Eventually.append
+  (post : MachineState → Prop) (init : MachineState)
+  (h : letI := layout.take p₁
+       Eventually (step1 p₁.toExecutable) post init) :
+    Eventually (step1 (p₁ ++ p₂).toExecutable) post init := by
+  sorry
