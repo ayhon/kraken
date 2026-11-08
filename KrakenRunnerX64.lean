@@ -73,12 +73,14 @@ def stackLocation : UInt64 := 0x7ffecafee200
 def initData : MachineData := {regs := {rsp := stackLocation}, dmem := initStack stackLocation}
 
 def finishCriterion (p : Program) (s : MachineState) : Bool :=
-  s.pc = p.fakeLayout.labels.label _end
+  some s.pc == p.fakeLayout.labels.label? _end
 
 def runKraken (asmCode : String)
     : Except String MachineState := do
   let prog ← Kraken.X64.Parser.parse (_start ++ ":" ++ asmCode ++ "\n" ++ _end ++ ":")
-  let initState : MachineState := ⟨initData, prog.fakeLayout.labels.label _start⟩
+  let some start := prog.fakeLayout.labels.label? _start
+    | .error s!"Missing start label {_start}"
+  let initState : MachineState := ⟨initData, start⟩
   prog.fakeLayout.eval initState (finishCriterion prog)
 
 /-! ## Fuzzer instantiation -/

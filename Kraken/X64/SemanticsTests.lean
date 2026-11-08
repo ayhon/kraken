@@ -52,3 +52,14 @@ private def wrapping : MachineData :=
   some ([(0xfffffffffffffff8, UInt64.size), (0, 8)], [])
 #guard accessChecks (wrapping.storeAvx (w := .W128) 0xfffffffffffffff8 0 fun s => .done ⟨s, 0⟩) ==
   some ([], [(0xfffffffffffffff8, UInt64.size), (0, 8)])
+
+private def emptyLabels : Labels := { label? _ := none }
+
+#guard match @ConstExpr.interp emptyLabels (.add (.label "missing") (.int64 4)) ⟨0, 5⟩ (fun _ => .done ⟨s, 0⟩) with
+  | .undefined_label l => l == "missing"
+  | _ => false
+
+#guard match (letI := emptyLabels; letI : AddressSize := ⟨.W64⟩
+    Operation.interp (w := .W64) (.jcc .z "missing_target") ⟨0, 2⟩ { s with status := { s.status with zf := true } } .next (fun a st => .done ⟨st, a⟩)) with
+  | .undefined_label l => l == "missing_target"
+  | _ => false
