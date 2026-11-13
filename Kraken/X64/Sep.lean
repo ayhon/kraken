@@ -1,34 +1,10 @@
 module
 
-import Kraken.Attribute
 public import Kraken.SeparationMem
 public import Kraken.X64.Semantics
 
-public section
+/-!
+# x86-64 Separation-Logic Memory Interface
 
-open Std
-open Std.ExtHashMap
-open List
-
-@[kspec]
-theorem store_sep (s : MachineData) (addr : BitVec 64) (w : Width) (v : w.type) (ret : MachineData → Effects)
-    (bs : List UInt8) (R : DataMem → Prop)
-    (h_mem : s.dmem =⋆ Eq (bs.At addr) ⋆ R)
-    (h_len : bs.length = w.bytes) :
-    have mem' := Mem.storeInt s.dmem addr w.bytes v.toInt
-    MachineData.store s addr v ret =
-      require_access require_write_access addr (UInt64.ofNat w.bytes) (fun _ =>
-        ret { s with dmem := mem' }) := by
-  have h_load : Mem.loadInt s.dmem addr w.bytes = some (Int.ofBytes bs) :=
-    Mem.loadInt_sep bs addr w.bytes R s.dmem h_mem h_len (by cases w <;> decide)
-  simp only [MachineData.store, h_load]
-
-@[kspec]
-theorem load_sep (s : MachineData) (addr : BitVec 64) (w : Width) (ret : w.type → MachineData → Effects)
-    (bs : List UInt8) (R : DataMem → Prop)
-    (h_mem : s.dmem =⋆ Eq (bs.At addr) ⋆ R)
-    (h_len : bs.length = w.bytes) :
-    MachineData.load s addr w ret =
-      require_access require_read_access addr (UInt64.ofNat w.bytes) (fun _ => ret (.ofInt w.bits (Int.ofBytes bs)) s) := by
-  simp only [MachineData.load,
-    Mem.loadInt_sep bs addr w.bytes R s.dmem h_mem h_len (by cases w <;> decide)]
+Re-exports `Kraken.SeparationMem` and `Kraken.X64.Semantics`.
+-/

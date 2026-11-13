@@ -1,17 +1,17 @@
 module
 
+/-!
+# Contiguous Sublist (`IsInfixAt`) and Infix Index Lookup (`infixIdx`)
+-/
+
 @[expose] public section
 
 universe u
 
 namespace List
 
-/--
-The first list is a contiguous sub-list of the second list.
-
-In other words, `IsInfixAt l₁ l₂ k` means that there exist lists `s : List α` and `t : List α` such that
-`l₂` has the form `s ++ l₁ ++ t` and `s` has length `k`.
--/
+/-- `IsInfixAt l₁ l₂ k` holds when `l₁` is a prefix of `l₂.drop k`, i.e. `l₂ = s ++ l₁ ++ t`
+with `s.length = k`. -/
 def IsInfixAt {α : Type u} (l₁ l₂ : List α) (k : Nat) : Prop := l₁.IsPrefix (l₂.drop k)
 
 variable {α : Type u} {l₁ l₂ a b : List α} {d : α} {k : Nat}

@@ -8,15 +8,18 @@ public section
 /-!
 # Kraken Memory Access
 
-This module provides definitions and basic theorems about individual
-memory-accessing operations supported by Kraken semantics. Compound structures
-defined for programs, even if common, belong elsewhere. This file does not
-depend on separation-logic definitions.
+Definitions and foundational theorems for byte-addressed memory maps (`Mem w`) and contiguous byte
+regions (`List.At`), independent of separation logic.
 -/
 
-open Std
-open Std.ExtHashMap
-open List
+open Std Std.ExtHashMap List
+
+/-! ### Memory representation and operations -/
+
+theorem List.range_get_eq_map_some {α : Type} (l : List α) :
+    (List.range l.length).map (fun i => if h : i < l.length then some (l.get ⟨i, h⟩) else none) =
+      l.map some := by
+  apply List.ext_get <;> simp
 
 abbrev Mem (w) := ExtHashMap (BitVec w) UInt8
 
@@ -26,9 +29,7 @@ def Mem.loadBytes {w} (m : Mem w) (a : BitVec w) (n : Nat) : Option (List UInt8)
 def Mem.loadInt {w} (m : Mem w) (a : BitVec w) (n : Nat) : Option Int :=
   (loadBytes m a n).map Int.ofBytes
 
-
--- JP: can't use the Mem abbreviation here because it resolves to List.Mem (the
--- predicate)
+/-- Map assigning `bs[i]` to address `a + i` for `0 ≤ i < bs.length`. -/
 def List.At {w} (bs : List UInt8) (a : BitVec w) : ExtHashMap (BitVec w) UInt8 :=
   .ofList (bs.mapIdx (fun i b => (a + .ofNat w i, b)))
 
@@ -37,7 +38,6 @@ def Mem.storeBytes {w} (m : Mem w) (a : BitVec w) (bs : List UInt8) : Mem w :=
 
 def Mem.storeInt {w} (m : Mem w) (a : BitVec w) (n : Nat) (v : Int) : Mem w :=
   storeBytes m a (Int.toBytes n v)
-
 
 @[expose] def UInt64.At {w} (val : UInt64) (a : BitVec w) : Mem w :=
   val.toBytes.At a
@@ -51,19 +51,36 @@ def Mem.storeInt {w} (m : Mem w) (a : BitVec w) (n : Nat) (v : Int) : Mem w :=
 @[expose] def UInt8.At {w} (val : UInt8) (a : BitVec w) : Mem w :=
   val.toBytes.At a
 
+/-! ### Address membership, lookup, and disjointness of `List.At` -/
 
 theorem mem_At_iff {w} (bs : List UInt8) (a : BitVec w) (k : BitVec w) :
     k ∈ bs.At a ↔ ∃ i < bs.length, k = a + .ofNat w i := by
-  simp only [List.At, mem_ofList, List.elem_iff, mem_map, mem_mapIdx, Prod.mk.injEq, exists_and_right, exists_eq_right, Prod.exists]; grind
+  simp only [List.At, mem_ofList, List.elem_iff, mem_map, mem_mapIdx, Prod.mk.injEq,
+    exists_and_right, exists_eq_right, Prod.exists]
+  grind
+
+theorem mem_At_samerange {w : Nat} (_bs bs : List UInt8) (a : BitVec w)
+    (h_len : _bs.length = bs.length) (k : BitVec w) :
+    (k ∈ bs.At a) = (k ∈ _bs.At a) :=
+  propext (by simp [mem_At_iff, h_len])
+
+theorem disjoint_Atsame_l_same_r {w : Nat} (_bs bs : List UInt8) (a : BitVec w) (m2 : Mem w)
+    (h_disj : (_bs.At a).inter m2 = ∅) (h_len : _bs.length = bs.length) :
+    (bs.At a).inter m2 = ∅ := by
+  simpa [eq_empty_iff_forall_not_mem, inter_eq, mem_inter_iff,
+    mem_At_samerange _bs bs a h_len] using h_disj
 
 theorem get?_At {w} (bs : List UInt8) (a : BitVec w) (p : BitVec w) (hw : bs.length ≤ 2 ^ w) :
     (bs.At a)[p]? = bs[(p - a).toNat]? := by
   if h : (p - a).toNat < bs.length then
     rw [getElem?_eq_getElem h, List.At]
-    have h_self : .ofNat w (p - a).toNat = p - a := BitVec.eq_of_toNat_eq (Nat.mod_eq_of_lt (BitVec.isLt _))
-    have hp : p = a + .ofNat w (p - a).toNat := by rw [h_self, BitVec.add_comm, BitVec.sub_add_cancel]
+    have h_self : .ofNat w (p - a).toNat = p - a :=
+      BitVec.eq_of_toNat_eq (Nat.mod_eq_of_lt (BitVec.isLt _))
+    have hp : p = a + .ofNat w (p - a).toNat := by
+      rw [h_self, BitVec.add_comm, BitVec.sub_add_cancel]
     conv => lhs; rw [hp]
-    have h_mem : ⟨a + .ofNat w (p - a).toNat, bs[(p - a).toNat]⟩ ∈ bs.mapIdx (fun i b => (a + .ofNat w i, b)) := by
+    have h_mem : ⟨a + .ofNat w (p - a).toNat, bs[(p - a).toNat]⟩ ∈
+        bs.mapIdx (fun i b => (a + .ofNat w i, b)) := by
       rw [mem_mapIdx]; exact ⟨_, h, rfl⟩
     apply getElem?_ofList_of_mem (k_beq := by simp) _ h_mem
     rw [List.pairwise_iff_getElem]
@@ -74,13 +91,20 @@ theorem get?_At {w} (bs : List UInt8) (a : BitVec w) (p : BitVec w) (hw : bs.len
     simp only [List.getElem_mapIdx, beq_eq_false_iff_ne, Ne] at *
     intro h_eq
     have h_cancel := congrArg (fun x => (x - a).toNat) h_eq
-    simp [BitVec.add_comm a, BitVec.add_sub_cancel, BitVec.toNat_ofNat, Nat.mod_eq_of_lt hi_w, Nat.mod_eq_of_lt hj_w] at h_cancel
+    simp [BitVec.add_comm a, BitVec.add_sub_cancel, BitVec.toNat_ofNat,
+      Nat.mod_eq_of_lt hi_w, Nat.mod_eq_of_lt hj_w] at h_cancel
     omega
   else
-    rw [ExtHashMap.getElem?_eq_none, List.getElem?_eq_none (by omega)]; rw [mem_At_iff]; rintro ⟨j, hj, rfl⟩; apply h
-    simp (discharger := omega) [BitVec.add_comm a, BitVec.add_sub_cancel, BitVec.toNat_ofNat, Nat.mod_eq_of_lt]; omega
+    rw [ExtHashMap.getElem?_eq_none, List.getElem?_eq_none (by omega)]
+    rw [mem_At_iff]
+    rintro ⟨j, hj, rfl⟩
+    apply h
+    simp (discharger := omega) [BitVec.add_comm a, BitVec.add_sub_cancel,
+      BitVec.toNat_ofNat, Nat.mod_eq_of_lt]
+    omega
 
-theorem get?_At_idx {w} (bs : List UInt8) (a : BitVec w) (i : Nat) (hi : i < 2 ^ w) (hw : bs.length ≤ 2 ^ w) :
+theorem get?_At_idx {w} (bs : List UInt8) (a : BitVec w) (i : Nat) (hi : i < 2 ^ w)
+    (hw : bs.length ≤ 2 ^ w) :
     (bs.At a).get? (a + .ofNat w i) = bs[i]? := by
   simpa [get?_eq_getElem?, BitVec.add_comm a, BitVec.add_sub_cancel,
     BitVec.toNat_ofNat, Nat.mod_eq_of_lt hi] using get?_At bs a (a + .ofNat w i) hw
@@ -93,8 +117,9 @@ theorem List.disjoint_At_append {w} (bs1 bs2 : List UInt8) (a : BitVec w)
   rw [mem_At_iff] at h1 h2; rcases h1 with ⟨i, hi, rfl⟩; rcases h2 with ⟨j, hj, h_eq2⟩
   rw [BitVec.add_assoc, ← BitVec.ofNat_add] at h_eq2
   have h_cancel := congrArg (fun x => (x - a).toNat) h_eq2
-  rw [BitVec.add_comm a, BitVec.add_sub_cancel, BitVec.add_comm a, BitVec.add_sub_cancel, BitVec.toNat_ofNat,
-      BitVec.toNat_ofNat, Nat.mod_eq_of_lt (by omega), Nat.mod_eq_of_lt (by omega)] at h_cancel
+  rw [BitVec.add_comm a, BitVec.add_sub_cancel, BitVec.add_comm a, BitVec.add_sub_cancel,
+    BitVec.toNat_ofNat, BitVec.toNat_ofNat, Nat.mod_eq_of_lt (by omega),
+    Nat.mod_eq_of_lt (by omega)] at h_cancel
   omega
 
 theorem List.At_append {w} (bs1 bs2 : List UInt8) (a : BitVec w)
@@ -110,7 +135,8 @@ theorem List.At_append {w} (bs1 bs2 : List UInt8) (a : BitVec w)
       apply h_disj
       rw [inter_eq, mem_inter_iff, mem_At_iff]
       refine ⟨⟨(k - a).toNat, h_lt, ?_⟩, h2⟩
-      have h_self : .ofNat w (k - a).toNat = k - a := BitVec.eq_of_toNat_eq (Nat.mod_eq_of_lt (BitVec.isLt _))
+      have h_self : .ofNat w (k - a).toNat = k - a :=
+        BitVec.eq_of_toNat_eq (Nat.mod_eq_of_lt (BitVec.isLt _))
       rw [h_self, BitVec.add_comm, BitVec.sub_add_cancel]
     have h_none : bs2[(k - (a + .ofNat w bs1.length)).toNat]? = none :=
       (get?_At bs2 _ _ (by omega)).symm.trans (ExtHashMap.getElem?_eq_none h_not2)
@@ -125,3 +151,5 @@ theorem List.At_append {w} (bs1 bs2 : List UInt8) (a : BitVec w)
       rw [BitVec.toNat_sub_of_le h_le]
       rw [BitVec.toNat_ofNat, Nat.mod_eq_of_lt (by omega)]
     simp only [h_bs1, Option.or_none, h_idx]
+
+end

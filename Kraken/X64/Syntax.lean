@@ -5,37 +5,22 @@ public import Kraken.Layout
 public import Lean.ToExpr
 meta import Lean.Elab.Deriving.ToExpr
 
+/-!
+# x86-64 Assembly Syntax
+
+Registers, widths, constant and address expressions, operands, condition codes,
+instructions, and directives for x86-64.
+-/
+
 @[expose] public section
 
-inductive Width | W8 | W16 | W32 | W64 deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
+/-! ### Widths and Registers -/
 
-instance : ToString Width where
-  toString | .W8 => "w8" | .W16 => "w16" | .W32 => "w32" | .W64 => "w64"
-
-namespace Width
-@[kstep, simp, reducible] def bits : Width → Nat | W8 => 8 | W16 => 16 | W32 => 32 | W64 => 64
-@[kstep, simp, reducible] def bytes : Width → Nat | W8 => 1 | W16 => 2 | W32 => 4 | W64 => 8
-@[kstep] abbrev bytesv (w : Width) {n} : BitVec n := BitVec.ofNat n w.bytes
-@[kstep] abbrev type (w : Width) : Type := BitVec w.bits
-instance {w : Width} : Coe Bool w.type where coe := fun b : Bool => BitVec.ofNat _ b.toNat
-end Width
-
-unif_hint (w : Width) where
-  w =?= Width.W8 |- Width.type w =?= BitVec 8
-
-unif_hint (w : Width) where
-  w =?= Width.W16 |- Width.type w =?= BitVec 16
-
-unif_hint (w : Width) where
-  w =?= Width.W32 |- Width.type w =?= BitVec 32
-
-unif_hint (w : Width) where
-  w =?= Width.W64 |- Width.type w =?= BitVec 64
-
-inductive AvxWidth | W128 | W256 | W512 deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
+inductive AvxWidth | W128 | W256 | W512
+  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
 
 instance : ToString AvxWidth where
-  toString |.W128 => "w128" | .W256 => "w256" | .W512 => "w512"
+  toString | .W128 => "w128" | .W256 => "w256" | .W512 => "w512"
 
 namespace AvxWidth
 @[simp, reducible] def bits : AvxWidth → Nat | W128 => 128 | W256 => 256 | W512 => 512
@@ -74,7 +59,7 @@ inductive Reg64
 
 inductive Reg : Width → Type
   | low (_ : Reg64) (w : Width) : Reg w
-  | ah : Reg .W8 | bh : Reg .W8 | ch : Reg .W8| dh : Reg .W8
+  | ah : Reg .W8 | bh : Reg .W8 | ch : Reg .W8 | dh : Reg .W8
   deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
 
 inductive AvxReg : AvxWidth → Type
@@ -83,221 +68,15 @@ inductive AvxReg : AvxWidth → Type
   | zmm (_ : RegMm) : AvxReg AvxWidth.W512
   deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
 
-abbrev Label := String
-
-inductive ConstExpr
-  | label (_ : Label)
-  | int64 (_ : Int64)
-  | before_current_instruction | after_current_instruction
-  | add (_ _ : ConstExpr) | sub (_ _ : ConstExpr)
-  -- Careful adding operations here! Need to match overflow behavior of all
-  -- assemblers we want compatibility with. We assume oversized literals error;
-  -- clang and gcc seem to always use 64-bit arithmetic (MCValue has an int64).
-  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
-instance : Coe Label ConstExpr where coe := .label
-instance : Coe Int64 ConstExpr where coe := .int64
-attribute [coe] ConstExpr.label
-attribute [coe] ConstExpr.int64
-
-structure RegW where (w : Width) (reg : Reg w)
-  deriving Repr, DecidableEq, Hashable, Lean.ToExpr, Hashable, Lean.ToExpr
-
-structure AvxRegW where (w : AvxWidth) (reg : AvxReg w)
-  deriving Repr, DecidableEq, Hashable, Lean.ToExpr, Hashable, Lean.ToExpr
-
--- For address expressions, the width of the register is determined only by the
--- instruction-wide address prefix. Concretely:
--- * movb $2 (%eax) denotes moving a single byte (operand width) into the memory
---   location at the 32-bit address stored in %eax (address width) -- note that
---   there is inference here!
--- * addr32 movb $2 (%rax) means the exact same thing, so the `addr32` prefix
---   acts as an instruction-wide override (at least for Clang; GCC rejects this)
---
--- Note that by doing so, we faithfully model two key things
--- * high byte registers cannot appear within memory operands:
---   test.S:1:11: error: invalid base+index expression
---   movb $2, (%ah)
--- * the operand encoding in the instruction encoding does not actually contain
---   a width -- it's all in the instruction-wide address size, modeled via the
---   `AddressSize` type class, below.
---
--- Implementation-wise, this means that our parser *will* have to do some amount
--- of type inference.
-inductive RegOrRip where | reg (_ : Reg64) | rip : RegOrRip
-  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
-
-structure AddrIndex where
-  reg : Reg64
-  scale: Width
-  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
-
-structure AddrExpr where
-  base : Option RegOrRip
-  idx : Option AddrIndex
-  disp : ConstExpr := .int64 0
-  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
-
-class AddressSize where address_size : Width
-export AddressSize (address_size)
-
-inductive RegOrMem w | reg (r : Reg w) | mem (_ : AddrExpr)
-  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
-instance {w} : Coe AddrExpr (RegOrMem w) where coe := RegOrMem.mem
-attribute [coe] RegOrMem.mem
-instance {w} : Coe (Reg w) (RegOrMem w) where coe := .reg
-attribute [coe] RegOrMem.reg
-abbrev Dst := RegOrMem
-
-inductive AvxRegOrMem (w : AvxWidth) | avx (r : AvxReg w) | mem (_ : AddrExpr)
-  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
-instance {w} : Coe AddrExpr (AvxRegOrMem w) where coe := AvxRegOrMem.mem
-attribute [coe] AvxRegOrMem.mem
-instance {w} : Coe (AvxReg w) (AvxRegOrMem w) where coe := .avx
-attribute [coe] AvxRegOrMem.avx
-abbrev AvxDst := AvxRegOrMem
-
-inductive Operand w | regOrMem (_ : RegOrMem w) | imm (v : ConstExpr)
-  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
-instance {w} : Coe (RegOrMem w) (Operand w) where coe := .regOrMem
-attribute [coe] Operand.regOrMem
-instance {w} : Coe ConstExpr (Operand w) where coe := Operand.imm
-attribute [coe] Operand.imm
-abbrev Operand.reg {w} (r : Reg w) : Operand w := regOrMem (.reg r)
-abbrev Operand.mem {w} (m : AddrExpr) : Operand w := regOrMem (.mem m)
-
--- TODO: We could remove this and use AvxRegOrMem directly.
-inductive AvxOperand (w : AvxWidth) | regOrMem (_ : AvxRegOrMem w)
-  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
-instance {w} : Coe (AvxRegOrMem w) (AvxOperand w) where coe := .regOrMem
-attribute [coe] AvxOperand.regOrMem
-abbrev AvxOperand.avx {w} (r : AvxReg w) : AvxOperand w := regOrMem (.avx r)
-abbrev AvxOperand.mem {w} (m : AddrExpr) : AvxOperand w := regOrMem (.mem m)
-
-inductive CondCode | o | no | c | nc | z | nz | be | a | s | ns | p | np | l | ge | le | g
-  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
-abbrev CondCode.e := CondCode.z
-abbrev CondCode.ne := CondCode.nz
-abbrev CondCode.b := CondCode.c
-abbrev CondCode.ae := CondCode.nc
-
-inductive ShiftCountExpr | cl | imm8 (v : ConstExpr)
-  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
-
-inductive RelRegOrMem | rel (_ : ConstExpr) | reg (r : Reg .W64) | mem (_ : AddrExpr)
-  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
-
-inductive Operation (w : Width)
-  -- Data movement
-  | mov (_ : Dst w) (src : Operand w)
-  | movsx {w'} (_ : Dst w) (src : RegOrMem w') -- {_ : w'.bits < w.bits ∧ w'.bits < 32}
-  | movzx {w'} (_ : Dst w) (src : RegOrMem w') -- {_ : w'.bits < w.bits ∧ w'.bits < 32}
-  | push (src : Operand w)
-  | pop  (_ : Dst w)
-  | setcc (_ : CondCode) (_ : Dst w) -- {_ : w = .W8}
-  | cmovcc (_ : CondCode) (_ : Reg w) (src : RegOrMem w)
-  -- String moves and stores, once or with a `rep` prefix
-  | movs (rep : Bool)
-  | stos (rep : Bool)
-  -- Arithmetic
-  | lea (_ : Reg w) (src : AddrExpr) -- {_ : 16 <= w.bits}
-  | add  (_ : Dst w) (src : Operand w)
-  | adc  (_ : Dst w) (src : Operand w)
-  | adcx (_ : Reg w) (src : RegOrMem w) -- {_ : 32 <= w.bits}
-  | adox (dst : Reg w) (src : RegOrMem w) -- {_ : 32 <= w.bits}
-  | inc  (_ : RegOrMem w)
-  | dec  (_ : RegOrMem w)
-  | neg  (_ : RegOrMem w)
-  | sub  (_ : Dst w) (src : Operand w)
-  | sbb  (_ : Dst w) (src : Operand w)
-  | cmp  (a : RegOrMem w) (b : Operand w)
-  | mul  (src : RegOrMem w)
-  | mulx (hi lo : Reg w) (src : RegOrMem w) -- {_ : 32 <= w.bits}
-  -- imul1 and imul collectively describe variants of the same
-  -- syntax level `imul` instruction, where imul1 is the 1-operand case
-  | imul1 (src : RegOrMem w)
-  | imul (_ : Option (Dst w)) (src1 : RegOrMem w) (src2 : Operand w)
-  -- Bitwise
-  | test (a : RegOrMem w) (b : Operand w)
-  | and  (_ : Dst w) (src : Operand w)
-  | not  (_ : Dst w)
-  | or   (_ : Dst w) (src : Operand w)
-  | xor  (_ : Dst w) (src : Operand w)
-  | shl  (_ : Dst w) (_ : ShiftCountExpr)
-  | shr  (_ : Dst w) (_ : ShiftCountExpr)
-  | sar  (_ : Dst w) (_ : ShiftCountExpr)
-  | shld (_ : Dst w) (src : Reg w) (_ : ShiftCountExpr) -- {_ : 16 <= w.bits}
-  | shrd (_ : Dst w) (src : Reg w) (_ : ShiftCountExpr) -- {_ : 16 <= w.bits}
-  | rol  (_ : Dst w) (_ : ShiftCountExpr)
-  | ror  (_ : Dst w) (_ : ShiftCountExpr)
-  | rcl  (_ : Dst w) (_ : ShiftCountExpr)
-  | rcr  (_ : Dst w) (_ : ShiftCountExpr)
-  | bswap  (dst : Reg w) -- (_ : w = .W32 ∨ w = .W64)
-  -- Flag control
-  | cld
-  | std
-  -- Control flow
-  | jcc (cc : CondCode) (target : Label)
-  | jmp (target : RelRegOrMem)
-  | call (target : RelRegOrMem)
-  | ret
-  | nop (length : Nat)
-  -- TODO: optiona third argument, with the caveat that `.align 16,,0` is valid
-  -- syntax
-  | nopalign (alignment : Nat) (pad : Option Nat)
+structure RegW where
+  w : Width
+  reg : Reg w
   deriving Repr, DecidableEq, Hashable, Lean.ToExpr
 
--- The non-v* variants take SSE registers only.
--- TODO: AVX512 extensions (write-masking, ...)
-inductive AvxOperation (w : AvxWidth)
-  | movups (_ : AvxDst w) (src : AvxRegOrMem w)
-  | vmovups (_ : AvxDst w) (src : AvxRegOrMem w)
-  | movaps (_ : AvxDst w) (src : AvxRegOrMem w)
-  | subps (_ : AvxDst w) (src : AvxRegOrMem w)
-  | addps (_ : AvxDst w) (src : AvxRegOrMem w)
-  -- SSE2, SSSE3, and SSE4.1 integer operations
-  | movdqu (_ : AvxDst w) (src : AvxRegOrMem w)
-  | movdqa (_ : AvxDst w) (src : AvxRegOrMem w)
-  | paddd (_ : AvxDst w) (src : AvxRegOrMem w)
-  | pshufb (_ : AvxDst w) (src : AvxRegOrMem w)
-  | pshufd (_ : AvxDst w) (src : AvxRegOrMem w) (imm : ConstExpr)
-  | palignr (_ : AvxDst w) (src : AvxRegOrMem w) (imm : ConstExpr)
-  | pblendw (_ : AvxDst w) (src : AvxRegOrMem w) (imm : ConstExpr)
-  -- VEX moves, which clear every bit above what they write
-  | vmovdqu (_ : AvxDst w) (src : AvxRegOrMem w)
-  -- `vmovd` when `n` is 32 bits, `vmovq` when it is 64
-  | vmovIn (n : Width) (_ : AvxReg w) (src : RegOrMem n)
-  | vmovOut (n : Width) (_ : Dst n) (src : AvxReg w)
-  | vmovq (_ : AvxReg w) (src : AvxReg w)
-  | vzeroupper
-  -- SHA extensions
-  | sha256rnds2 (_ : AvxDst w) (src : AvxRegOrMem w)  -- reads xmm0 implicitly
-  | sha256msg1 (_ : AvxDst w) (src : AvxRegOrMem w)
-  | sha256msg2 (_ : AvxDst w) (src : AvxRegOrMem w)
-  -- AVX-512 integer operations, without write-masking
-  | vmovdqu32 (_ : AvxDst w) (src : AvxRegOrMem w)
-  | vmovdqa32 (_ : AvxDst w) (src : AvxRegOrMem w)
-  | vpaddd (_ : AvxDst w) (src1 src2 : AvxRegOrMem w)
-  | vprord (_ : AvxDst w) (src : AvxRegOrMem w) (imm : ConstExpr)
-  | vpsrld (_ : AvxDst w) (src : AvxRegOrMem w) (imm : ConstExpr)
-  | vpternlogd (_ : AvxDst w) (src2 src3 : AvxRegOrMem w) (imm : ConstExpr)
+structure AvxRegW where
+  w : AvxWidth
+  reg : AvxReg w
   deriving Repr, DecidableEq, Hashable, Lean.ToExpr
-
-inductive Instr
-  | regular (address_size : Width) (operation_size : Width) (operation : Operation operation_size)
-  | avx (address_size : Width) (operation_size : AvxWidth) (operation : AvxOperation operation_size)
-  deriving Repr, DecidableEq, Hashable, Lean.ToExpr
-
-instance [AddressSize] {w : Width} : CoeOut (Operation w) Instr where
-  coe op := Instr.regular address_size w op
-
-instance [AddressSize] {w : AvxWidth} : CoeOut (AvxOperation w) Instr where
-  coe op := Instr.avx address_size w op
-
-abbrev Directive := Kraken.Directive Instr ConstExpr
-
-abbrev Program := List Directive
-
-abbrev Executable := Kraken.Executable Instr ConstExpr
 
 namespace Reg
 @[match_pattern] abbrev rax := low .rax .W64
@@ -368,3 +147,209 @@ namespace Reg
 @[match_pattern] abbrev r14b := low .r14 .W8
 @[match_pattern] abbrev r15b := low .r15 .W8
 end Reg
+
+/-! ### Constant and Address Expressions -/
+
+/-- Assembler constant expression, evaluated using 64-bit arithmetic. -/
+inductive ConstExpr
+  | label (_ : Label)
+  | int64 (_ : Int64)
+  | before_current_instruction | after_current_instruction
+  | add (_ _ : ConstExpr) | sub (_ _ : ConstExpr)
+  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
+
+instance : Coe Label ConstExpr where coe := .label
+instance : Coe Int64 ConstExpr where coe := .int64
+instance {n} [OfNat Int64 n] : OfNat ConstExpr n where ofNat := .int64 (OfNat.ofNat n)
+attribute [coe] ConstExpr.label
+attribute [coe] ConstExpr.int64
+
+/-- Base register or `%rip` in an address expression. High-byte registers (`%ah`–`%dh`) cannot
+appear in memory operands, and the effective address width is determined by the instruction-wide
+`AddressSize` prefix rather than per-register width annotations. -/
+inductive RegOrRip where
+  | reg (_ : Reg64)
+  | rip : RegOrRip
+  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
+
+structure AddrIndex where
+  reg : Reg64
+  scale : Width
+  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
+
+structure AddrExpr where
+  base : Option RegOrRip
+  idx : Option AddrIndex
+  disp : ConstExpr := .int64 0
+  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
+
+/-- Instruction-wide effective address width (e.g. `.W64`, or `.W32` under an `addr32` prefix). -/
+class AddressSize where
+  address_size : Width
+export AddressSize (address_size)
+
+/-! ### Operands and Condition Codes -/
+
+inductive RegOrMem (w : Width)
+  | reg (r : Reg w)
+  | mem (_ : AddrExpr)
+  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
+
+instance {w} : Coe AddrExpr (RegOrMem w) where coe := RegOrMem.mem
+attribute [coe] RegOrMem.mem
+instance {w} : Coe (Reg w) (RegOrMem w) where coe := .reg
+attribute [coe] RegOrMem.reg
+abbrev Dst := RegOrMem
+
+inductive AvxRegOrMem (w : AvxWidth)
+  | avx (r : AvxReg w)
+  | mem (_ : AddrExpr)
+  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
+
+instance {w} : Coe AddrExpr (AvxRegOrMem w) where coe := AvxRegOrMem.mem
+attribute [coe] AvxRegOrMem.mem
+instance {w} : Coe (AvxReg w) (AvxRegOrMem w) where coe := .avx
+attribute [coe] AvxRegOrMem.avx
+abbrev AvxDst := AvxRegOrMem
+
+inductive Operand (w : Width)
+  | regOrMem (_ : RegOrMem w)
+  | imm (v : ConstExpr)
+  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
+
+instance {w} : Coe (RegOrMem w) (Operand w) where coe := .regOrMem
+attribute [coe] Operand.regOrMem
+instance {w} : Coe ConstExpr (Operand w) where coe := Operand.imm
+attribute [coe] Operand.imm
+abbrev Operand.reg {w} (r : Reg w) : Operand w := regOrMem (.reg r)
+abbrev Operand.mem {w} (m : AddrExpr) : Operand w := regOrMem (.mem m)
+
+inductive AvxOperand (w : AvxWidth)
+  | regOrMem (_ : AvxRegOrMem w)
+  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
+
+instance {w} : Coe (AvxRegOrMem w) (AvxOperand w) where coe := .regOrMem
+attribute [coe] AvxOperand.regOrMem
+abbrev AvxOperand.avx {w} (r : AvxReg w) : AvxOperand w := regOrMem (.avx r)
+abbrev AvxOperand.mem {w} (m : AddrExpr) : AvxOperand w := regOrMem (.mem m)
+
+inductive CondCode | o | no | c | nc | z | nz | be | a | s | ns | p | np | l | ge | le | g
+  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
+abbrev CondCode.e := CondCode.z
+abbrev CondCode.ne := CondCode.nz
+abbrev CondCode.b := CondCode.c
+abbrev CondCode.ae := CondCode.nc
+
+inductive ShiftCountExpr | cl | imm8 (v : ConstExpr)
+  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
+
+inductive RelRegOrMem | rel (_ : ConstExpr) | reg (r : Reg .W64) | mem (_ : AddrExpr)
+  deriving Repr, BEq, DecidableEq, Hashable, Lean.ToExpr
+
+/-! ### Operations, Instructions, and Directives -/
+
+inductive Operation (w : Width)
+  -- Data movement
+  | mov (_ : Dst w) (src : Operand w)
+  | movsx {w'} (_ : Dst w) (src : RegOrMem w')
+  | movzx {w'} (_ : Dst w) (src : RegOrMem w')
+  | push (src : Operand w)
+  | pop  (_ : Dst w)
+  | setcc (_ : CondCode) (_ : Dst w)
+  | cmovcc (_ : CondCode) (_ : Reg w) (src : RegOrMem w)
+  -- String moves and stores, once or with a `rep` prefix
+  | movs (rep : Bool)
+  | stos (rep : Bool)
+  -- Arithmetic
+  | lea (_ : Reg w) (src : AddrExpr)
+  | add  (_ : Dst w) (src : Operand w)
+  | adc  (_ : Dst w) (src : Operand w)
+  | adcx (_ : Reg w) (src : RegOrMem w)
+  | adox (dst : Reg w) (src : RegOrMem w)
+  | inc  (_ : RegOrMem w)
+  | dec  (_ : RegOrMem w)
+  | neg  (_ : RegOrMem w)
+  | sub  (_ : Dst w) (src : Operand w)
+  | sbb  (_ : Dst w) (src : Operand w)
+  | cmp  (a : RegOrMem w) (b : Operand w)
+  | mul  (src : RegOrMem w)
+  | mulx (hi lo : Reg w) (src : RegOrMem w)
+  | imul1 (src : RegOrMem w)
+  | imul (_ : Option (Dst w)) (src1 : RegOrMem w) (src2 : Operand w)
+  -- Bitwise
+  | test (a : RegOrMem w) (b : Operand w)
+  | and  (_ : Dst w) (src : Operand w)
+  | not  (_ : Dst w)
+  | or   (_ : Dst w) (src : Operand w)
+  | xor  (_ : Dst w) (src : Operand w)
+  | shl  (_ : Dst w) (_ : ShiftCountExpr)
+  | shr  (_ : Dst w) (_ : ShiftCountExpr)
+  | sar  (_ : Dst w) (_ : ShiftCountExpr)
+  | shld (_ : Dst w) (src : Reg w) (_ : ShiftCountExpr)
+  | shrd (_ : Dst w) (src : Reg w) (_ : ShiftCountExpr)
+  | rol  (_ : Dst w) (_ : ShiftCountExpr)
+  | ror  (_ : Dst w) (_ : ShiftCountExpr)
+  | rcl  (_ : Dst w) (_ : ShiftCountExpr)
+  | rcr  (_ : Dst w) (_ : ShiftCountExpr)
+  | bswap (dst : Reg w)
+  -- Flag control
+  | cld
+  | std
+  -- Control flow
+  | jcc (cc : CondCode) (target : Label)
+  | jmp (target : RelRegOrMem)
+  | call (target : RelRegOrMem)
+  | ret
+  | nop (length : Nat)
+  | nopalign (alignment : Nat) (pad : Option Nat)
+  deriving Repr, DecidableEq, Hashable, Lean.ToExpr
+
+/-- Vector / SSE operations (non-`v*` variants operate on legacy SSE registers). -/
+inductive AvxOperation (w : AvxWidth)
+  | movups (_ : AvxDst w) (src : AvxRegOrMem w)
+  | vmovups (_ : AvxDst w) (src : AvxRegOrMem w)
+  | movaps (_ : AvxDst w) (src : AvxRegOrMem w)
+  | subps (_ : AvxDst w) (src : AvxRegOrMem w)
+  | addps (_ : AvxDst w) (src : AvxRegOrMem w)
+  -- SSE2, SSSE3, and SSE4.1 integer operations
+  | movdqu (_ : AvxDst w) (src : AvxRegOrMem w)
+  | movdqa (_ : AvxDst w) (src : AvxRegOrMem w)
+  | paddd (_ : AvxDst w) (src : AvxRegOrMem w)
+  | pshufb (_ : AvxDst w) (src : AvxRegOrMem w)
+  | pshufd (_ : AvxDst w) (src : AvxRegOrMem w) (imm : ConstExpr)
+  | palignr (_ : AvxDst w) (src : AvxRegOrMem w) (imm : ConstExpr)
+  | pblendw (_ : AvxDst w) (src : AvxRegOrMem w) (imm : ConstExpr)
+  -- VEX moves, which clear every bit above what they write
+  | vmovdqu (_ : AvxDst w) (src : AvxRegOrMem w)
+  -- `vmovd` when `n` is 32 bits, `vmovq` when it is 64
+  | vmovIn (n : Width) (_ : AvxReg w) (src : RegOrMem n)
+  | vmovOut (n : Width) (_ : Dst n) (src : AvxReg w)
+  | vmovq (_ : AvxReg w) (src : AvxReg w)
+  | vzeroupper
+  -- SHA extensions
+  | sha256rnds2 (_ : AvxDst w) (src : AvxRegOrMem w)  -- reads xmm0 implicitly
+  | sha256msg1 (_ : AvxDst w) (src : AvxRegOrMem w)
+  | sha256msg2 (_ : AvxDst w) (src : AvxRegOrMem w)
+  -- AVX-512 integer operations, without write-masking
+  | vmovdqu32 (_ : AvxDst w) (src : AvxRegOrMem w)
+  | vmovdqa32 (_ : AvxDst w) (src : AvxRegOrMem w)
+  | vpaddd (_ : AvxDst w) (src1 src2 : AvxRegOrMem w)
+  | vprord (_ : AvxDst w) (src : AvxRegOrMem w) (imm : ConstExpr)
+  | vpsrld (_ : AvxDst w) (src : AvxRegOrMem w) (imm : ConstExpr)
+  | vpternlogd (_ : AvxDst w) (src2 src3 : AvxRegOrMem w) (imm : ConstExpr)
+  deriving Repr, DecidableEq, Hashable, Lean.ToExpr
+
+inductive Instr
+  | regular (address_size : Width) (operation_size : Width) (operation : Operation operation_size)
+  | avx (address_size : Width) (operation_size : AvxWidth) (operation : AvxOperation operation_size)
+  deriving Repr, DecidableEq, Hashable, Lean.ToExpr
+
+instance [AddressSize] {w : Width} : CoeOut (Operation w) Instr where
+  coe op := Instr.regular address_size w op
+
+instance [AddressSize] {w : AvxWidth} : CoeOut (AvxOperation w) Instr where
+  coe op := Instr.avx address_size w op
+
+abbrev Directive := Kraken.Directive Instr ConstExpr
+abbrev Program := List Directive
+abbrev Executable := Kraken.Executable Instr ConstExpr

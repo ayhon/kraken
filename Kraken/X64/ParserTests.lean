@@ -771,7 +771,7 @@ error: Type mismatch
 has type
   Reg w
 but is expected to have type
-  Kraken.Label
+  Label
 -/
 #guard_msgs in
 #check ⸨prog| jz ❰r❱ ⸩

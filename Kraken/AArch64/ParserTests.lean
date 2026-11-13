@@ -2005,7 +2005,7 @@ info: ⸨prog|
 error: Type mismatch
   lbl
 has type
-  Kraken.Label
+  Label
 but is expected to have type
   Int64
 -/

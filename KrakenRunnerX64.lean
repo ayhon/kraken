@@ -90,14 +90,6 @@ instance : StatusFlagBits StatusFlags where
   toBits f := f.cf.toNat ||| f.pf.toNat <<< 1 ||| f.af.toNat <<< 2 ||| f.zf.toNat <<< 3 ||| f.sf.toNat <<< 4 ||| f.of.toNat <<< 5
   ofBits := NondetSupportingType.from_hash
 
--- Runs `Effects` to completion, resolving every `undefined` choice with `h`. Also returns
--- whether any `undefined` choice was made.
-partial def evalEffects (h : UInt64) (sawUndef : Bool) : Effects → Option (MachineData × Bool)
-  | .done st => some (st.data, sawUndef)
-  | .require_read_access _ ok | .require_write_access _ ok | .require_exec_access _ ok => evalEffects h sawUndef (ok ())
-  | @Effects.undefined _ t cont => evalEffects h true (cont (t.from_hash h))
-  | _ => none
-
 instance : Gen Width := ⟨gen_ctors% Width⟩
 instance : Gen AvxWidth := ⟨gen_ctors% AvxWidth⟩
 instance : Gen RegMm := ⟨gen_ctors% RegMm⟩

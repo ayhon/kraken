@@ -596,14 +596,14 @@ structure MemOp where
 
 /-- The `MemOp` of a mnemonic that exists at both widths, whose memory access has size `access?` (the
     transfer register width when `none`). -/
-def mkMemOp (scaled unscaled : Name) (access? : Option MemWidth := none) (literal := false) :
+def mkMemOp (scaled unscaled : Name) (access? : Option Width := none) (literal := false) :
     AArch64ElabM MemOp := do
   let width? ← evalOperandWidth?
   return { scaled := ← mkAppWidth (mkConst scaled), unscaled := ← mkAppWidth (mkConst unscaled), literal,
            width?, scale? := access?.map (·.bytes) <|> width?.map (·.bytes) }
 
 /-- The `MemOp` of a mnemonic that only exists at width `w`, whose memory access has size `access`. -/
-def mkFixedMemOp (w : RegWidth) (access : MemWidth) (scaled unscaled : Name) (literal := false)
+def mkFixedMemOp (w : RegWidth) (access : Width) (scaled unscaled : Name) (literal := false)
     (pool := true) : AArch64ElabM MemOp := do
   requireWidth w
   return { scaled := mkConst scaled, unscaled := mkConst unscaled, literal, pool,

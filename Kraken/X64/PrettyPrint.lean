@@ -2,7 +2,6 @@ module
 
 import Kraken.X64.Syntax
 import Kraken.X64.Semantics
-import Kraken.X64.OmniSemantics
 meta import Lean
 public meta import Kraken.X64.PrintIntel
 public meta import Lean.PrettyPrinter

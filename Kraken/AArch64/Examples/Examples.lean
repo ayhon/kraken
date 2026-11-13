@@ -1,79 +1,58 @@
 module
 
-/-
-Kraken AArch64 - Example Programs
-
-Demonstrates AArch64 proofs using the `kstep` stepping tactic.
--/
-
-import Kraken.AArch64.OmniSemantics
 import Kraken.AArch64.Parser
 import Kraken.AArch64.Semantics
-import Kraken.AArch64.Sep
+import Kraken.BitVecArith
 import Kraken.Eval
+import Kraken.SeparationMem
 import Kraken.SeparationTactics
 import Kraken.Tactics
-import Std.Tactic.BVDecide
+import Kraken.ToBytes
 
+/-!
+# AArch64 Example Programs
+
+Example AArch64 assembly programs and correctness proofs demonstrating register arithmetic,
+control flow, memory addressing modes, function pointers, and jump tables.
+-/
 
 open Kraken.AArch64
 open Kraken.AArch64.Parser
+open Std
+open Std.ExtHashMap
 
-attribute [ksimp]
-  BitVec.add_zero
-  BitVec.ofInt_add
-  BitVec.ofInt_ofNat
-  BitVec.ofInt_toInt
-  BitVec.ofNat_uInt64ToNat
-  BitVec.setWidth_eq
-  Int.add_zero
-  Int64.toInt_neg
-  Nat.shiftRight_zero
-  Nat.sub_zero
-  UInt64.ofBitVec_add
-  UInt64.ofBitVec_ofNat
-  UInt64.ofBitVec_sub
-  UInt64.ofBitVec_toBitVec
-  UInt64.sub_add_cancel
-  UInt64.toBitVec_ofNat
-  UInt64.toBitVec_sub
-  UInt64.toNat_toBitVec
+/-! ### Register and Control-Flow Examples -/
 
---------------------------------------------------------------------------------
-
--- Register swap example using XOR
+/-- Register swap using `eor`. -/
 def swap : Program := ⸨prog|
   eor x0, x0, x1
   eor x1, x0, x1
   eor x0, x0, x1
 ⸩
 
-theorem swap_correct [layout : Layout] (d : MachineData) :
-    straightlineStep (layout swap) ⟨d, layout.start⟩
-    (fun s' =>
-        s'.1.regs.getRegOrZr .X0 = d.regs.getRegOrZr .X1 ∧
-        s'.1.regs.getRegOrZr .X1 = d.regs.getRegOrZr .X0) := by
+theorem swap_correct [layout : Host swap] (d : MachineData) :
+    (layout swap).Spec d
+      (post := fun st =>
+        st.data.regs.getRegOrZr .X0 = d.regs.getRegOrZr .X1 ∧
+        st.data.regs.getRegOrZr .X1 = d.regs.getRegOrZr .X0) := by
   kprologue swap with d
-  sym => kstep; tactic =>
-  grind
+  kfinish swap
 
--- Example 3: Multi-instruction arithmetic and shift pipeline
+/-- Multi-instruction arithmetic and shift pipeline. -/
 def arith_shift : Program := ⸨prog|
   add x0, x1, #42
   lsl x2, x0, #2
   sub x3, x2, x0
 ⸩
 
-theorem arith_shift_correct [layout : Layout] (d : MachineData) :
-    straightlineStep (layout arith_shift) ⟨d, layout.start⟩ (fun s' =>
-      s'.1.regs.getRegOrZr .X3 = 3 * (d.regs.getRegOrZr .X1 + 42)) := by
+theorem arith_shift_correct [layout : Host arith_shift] (d : MachineData) :
+    (layout arith_shift).Spec d
+      (post := fun st =>
+        st.data.regs.getRegOrZr .X3 = 3 * (d.regs.getRegOrZr .X1 + 42)) := by
   kprologue arith_shift with d
-  sym => kstep; tactic =>
-  simp (config := { zetaDelta := true }) only [show BitVec.ofInt 64 (Int64.toInt 42) = 42#64 from rfl,
-    show (Int64.toInt 0).toNat = 0 from rfl]
-  bv_decide
+  kfinish arith_shift
 
--- Example 4: Stepping through control flow (branch not taken)
+/-- Stepping through conditional branch (`cbnz` not taken). -/
 def controlflow : Program := ⸨prog|
 start:
   mov x0, #1
@@ -82,25 +61,14 @@ start:
   mov x1, #42
 ⸩
 
-theorem p4_correct [layout : Layout] (d : MachineData) :
-    Eventually (straightlineStep (layout controlflow))
-      (fun s' => s'.1.regs.X1 = 42)
-      ⟨d, layout.start⟩ := by
-  apply step_cps
+theorem p4_correct [layout : Host controlflow] (d : MachineData) :
+    (layout controlflow).Spec d (post := fun st => st.data.regs.X1 = 42) := by
   kprologue controlflow with d
-  sym => kstep; tactic =>
-  rename_i v v1
-  have : v1 = 0 := by grind
-  simp [this]
-  sym => kstep; tactic =>
-  apply Eventually.done
-  simp (config := { zetaDelta := true }) only [show BitVec.ofInt 64 (Int64.toInt 42) = 42#64 from rfl]
-  bv_decide
+  kfinish controlflow
 
--- Example 5: Storing and loading registers to/from memory
-open Std
-open Std.ExtHashMap
+/-! ### Memory Addressing Examples -/
 
+/-- Storing and loading 64-bit registers with immediate byte offsets. -/
 def move_2_regs_to_heap : Program := ⸨prog|
     str x0, [x2]
     str x1, [x2, #8]
@@ -108,47 +76,19 @@ def move_2_regs_to_heap : Program := ⸨prog|
     ldr x4, [x2, #8]
 ⸩
 
-theorem move_2_regs_to_heap_correct [layout : Layout] (s₀ : MachineData)
-    (v1 v2 : UInt64)
-    (R : DataMem → Prop)
-    (h_mem : s₀.dmem =⋆ Eq (v1.At s₀.regs.X2.toBitVec) ⋆ Eq (v2.At (s₀.regs.X2.toBitVec + 8#64)) ⋆ R) :
-    Eventually (straightlineStep (layout move_2_regs_to_heap))
-      (fun s' =>
-        s'.1.regs.X3 = s₀.regs.X0 ∧
-        s'.1.regs.X4 = s₀.regs.X1 ∧
-        s'.1.regs.X2 = s₀.regs.X2)
-      ⟨s₀, layout.start⟩ := by
-  apply step_cps
+theorem move_2_regs_to_heap_correct [layout : Host move_2_regs_to_heap] (s₀ : MachineData)
+    (v1 v2 : UInt64) (R : DataMem → Prop) :
+    (layout move_2_regs_to_heap).Spec s₀
+      (pre :=
+        s₀.dmem =⋆ v1 @ s₀.regs.X2 ⋆ v2 @ s₀.regs.X2 + 8 ⋆ R)
+      (post := fun st =>
+        st.data.regs.X3 = s₀.regs.X0 ∧
+        st.data.regs.X4 = s₀.regs.X1 ∧
+        st.data.regs.X2 = s₀.regs.X2) := by
   kprologue move_2_regs_to_heap with s₀
+  kfinish move_2_regs_to_heap
 
-  have h_bs1 : v1.toBytes.length = 8 := UInt64.toBytes_length v1
-  have h_bs2 : v2.toBytes.length = 8 := UInt64.toBytes_length v2
-  have h_mem1 := Mem.storeInt_sep X2.toBitVec 8 v1.toBytes (Eq (v2.At (X2.toBitVec + 8#64)) ⋆ R) mem ⟨by ecancel, h_bs1⟩ X0.toBitVec.toInt
-  have h_mem1' : (Eq (v2.At (X2.toBitVec + 8#64)) ⋆ (Eq ((Int.toBytes 8 X0.toBitVec.toInt).At X2) ⋆ R)) _ := cast (congrFun (by ac_rfl) _) h_mem1
-  have h_mem2 := Mem.storeInt_sep (X2.toBitVec + 8#64) 8 v2.toBytes _ _ ⟨h_mem1', h_bs2⟩ X1.toBitVec.toInt
-  have h_mem2' : (Eq ((Int.toBytes 8 X0.toBitVec.toInt).At X2) ⋆ (Eq ((Int.toBytes 8 X1.toBitVec.toInt).At (X2.toBitVec + 8#64)) ⋆ R)) _ := cast (congrFun (by ac_rfl) _) h_mem2
-  have h_mem2'' : (Eq ((Int.toBytes 8 X1.toBitVec.toInt).At (X2.toBitVec + 8#64)) ⋆ (Eq ((Int.toBytes 8 X0.toBitVec.toInt).At X2.toBitVec) ⋆ R)) _ := cast (congrFun (by ac_rfl) _) h_mem2'
-  simp at h_mem
-  sym =>
-  kstep
-  case h_mem => tactic => simp; ecancel
-  case h_len => exact h_bs1
-  kstep
-  case h_mem => tactic => simp; exact h_mem1'
-  case h_len => exact h_bs2
-  kstep
-  case h_mem => tactic => simp; exact h_mem2'
-  case h_len => tactic => rfl
-  kstep
-  case h_mem => tactic => simp; exact h_mem2''
-  case h_len => tactic => rfl
-  kstep
-  tactic =>
-  apply Eventually.done
-  rw [BitVec.ofInt_ofBytes_toBytes 64 8 rfl, BitVec.ofInt_ofBytes_toBytes 64 8 rfl]
-  exact ⟨rfl, rfl, rfl⟩
-
--- Example 6: Memory access with shifted register offset [x1, x2, lsl #3]
+/-- Memory access with shifted register offset `[x1, x2, lsl #3]`. -/
 def reg_offset_example : Program := ⸨prog|
     mov x0, #42
     str x0, [x1, x2, lsl #3]
@@ -156,25 +96,122 @@ def reg_offset_example : Program := ⸨prog|
     ldr x3, [x1, x2, lsl #3]
 ⸩
 
-theorem reg_offset_example_correct [layout : Layout] (s₀ : MachineData)
-    (v : UInt64) (R : DataMem → Prop)
-    (h_mem : s₀.dmem =⋆ Eq (v.At (s₀.regs.X1.toBitVec + BitVec.ofInt 64 (s₀.regs.X2.toBitVec.toNat <<< 3))) ⋆ R) :
-    Eventually (straightlineStep (layout reg_offset_example))
-      (fun s' => s'.1.regs.X3 = 42)
-      ⟨s₀, layout.start⟩ := by
-  apply step_cps
+theorem reg_offset_example_correct [layout : Host reg_offset_example] (s₀ : MachineData)
+    (v : UInt64) (R : DataMem → Prop) :
+    (layout reg_offset_example).Spec s₀
+      (pre :=
+        s₀.dmem =⋆ v @ s₀.regs.X1.toBitVec + BitVec.ofInt 64 (s₀.regs.X2.toBitVec.toNat <<< 3) ⋆ R)
+      (post := fun st => st.data.regs.X3 = 42) := by
   kprologue reg_offset_example with s₀
-  have h_bs : v.toBytes.length = 8 := UInt64.toBytes_length v
-  simp at h_mem
-  have h_mem' := Mem.storeInt_sep (X1.toBitVec + BitVec.ofInt 64 (X2.toBitVec.toNat <<< 3)) 8 v.toBytes R mem ⟨h_mem, h_bs⟩ 42
-  sym =>
+  kfinish reg_offset_example
+
+/-! ### Function Pointers and Jump Tables -/
+
+/-- Materializing a subroutine's address with `adr`, calling it indirectly with `blr`, and returning with `ret`. -/
+def fn_ptr_call : Program := ⸨prog|
+  adr x2, add_ten
+  blr x2
+  b done
+add_ten:
+  add x0, x0, #10
+  ret
+done:
+  nop
+⸩
+
+theorem fn_ptr_call_correct [layout : Host fn_ptr_call] (s₀ : MachineData) :
+    (layout fn_ptr_call).Spec s₀
+      (post := fun st => st.data.regs.X0 = s₀.regs.X0 + 10) := by
+  kprologue fn_ptr_call to "add_ten" with s₀
   kstep
-  case h_mem => tactic => simp; exact h_mem
-  case h_len => exact h_bs
+  simp +zetaDelta only [BitVec.ofInt_toInt, Int64.ofInt_bitVecToInt]
+  kprologue fn_ptr_call at "add_ten"
   kstep
-  case h_mem => tactic => simp; exact h_mem'
-  case h_len => exact by decide
+  simp +zetaDelta only [Int64.ofInt_bitVecToInt]
+  kprologue fn_ptr_call at 2
+  kfinish fn_ptr_call
+
+/-- Higher-order caller that invokes a callback at `fn_ptr` via `blr x2` and increments its return value. -/
+def apply_callback : Program := ⸨prog|
+  blr x2
+  add x0, x0, #1
+⸩
+
+theorem apply_callback_correct [layout : Host apply_callback] (s₀ : MachineData)
+    (fn_ptr : Int64) (f : UInt64 → UInt64)
+    (h_cb : ∀ s : MachineData,
+      (layout apply_callback).Spec s
+        (pc := fn_ptr)
+        (post := fun st =>
+          st.pc = Int64.ofInt s.regs.X30.toBitVec.toInt ∧
+          st.data.regs.X0 = f s.regs.X0)) :
+    (layout apply_callback).Spec s₀
+      (pre := Int64.ofInt s₀.regs.X2.toBitVec.toInt = fn_ptr)
+      (post := fun st => st.data.regs.X0 = f s₀.regs.X0 + 1) := by
+  intro h_fn
+  kprologue apply_callback take 1 with s₀
   kstep
-  tactic =>
-  apply Eventually.done
-  rfl
+  dsimp +zetaDelta only
+  rw [h_fn]
+  kcall h_cb _ with s₁ h_x0
+  simp +zetaDelta only [BitVec.ofInt_toInt, Int64.ofInt_bitVecToInt]
+  kprologue apply_callback at 1
+  kfinish apply_callback
+
+/-- 3-way jump-table dispatch (`adrp` + `:lo12:` page-offset address materialization +
+shifted-register `ldr` + `br`). -/
+def jump_table : Program := ⸨prog|
+  adrp x2, .Ltable
+  add x2, x2, :lo12:.Ltable
+  ldr x3, [x2, x0, lsl #3]
+  br x3
+.Lcase0:
+  mov x0, #10
+  b .Ldone
+.Lcase1:
+  mov x0, #20
+  b .Ldone
+.Lcase2:
+  mov x0, #30
+  b .Ldone
+.Ltable:
+.Ldone:
+  nop
+⸩
+
+theorem jump_table_correct [layout : Host jump_table] (s₀ : MachineData) (R : DataMem → Prop) :
+    (layout jump_table).Spec s₀
+      (pre :=
+        let tbl := ((layout jump_table).label ".Ltable").toBitVec
+        let c0 := UInt64.ofBitVec ((layout jump_table).label ".Lcase0").toBitVec
+        let c1 := UInt64.ofBitVec ((layout jump_table).label ".Lcase1").toBitVec
+        let c2 := UInt64.ofBitVec ((layout jump_table).label ".Lcase2").toBitVec
+        s₀.regs.X0.toNat < 3 ∧
+        (s₀.dmem =⋆ c0 @ tbl ⋆ c1 @ (tbl + 8#64) ⋆ c2 @ (tbl + 16#64) ⋆ R))
+      (post := fun st =>
+        st.data.regs.X0 = match s₀.regs.X0.toNat with | 0 => 10 | 1 => 20 | _ => 30) := by
+  rintro ⟨h_idx, h_mem⟩
+  have h_cases : s₀.regs.X0 = 0 ∨ s₀.regs.X0 = 1 ∨ s₀.regs.X0 = 2 := by
+    rcases (show s₀.regs.X0.toNat = 0 ∨ s₀.regs.X0.toNat = 1 ∨ s₀.regs.X0.toNat = 2 by omega) with h | h | h
+    · left; exact UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq (by simp [h]))
+    · right; left; exact UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq (by simp [h]))
+    · right; right; exact UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq (by simp [h]))
+  rcases h_cases with h0 | h1 | h2
+  · kprologue jump_table to ".Lcase0" with s₀
+    subst h0
+    kstep
+    simp +zetaDelta only [Int64.ofInt_bitVecToInt]
+    kprologue jump_table at ".Lcase0"
+    kfinish jump_table
+  · kprologue jump_table to ".Lcase0" with s₀
+    subst h1
+    kstep
+    simp +zetaDelta only [Int64.ofInt_bitVecToInt]
+    kprologue jump_table at ".Lcase1"
+    kfinish jump_table
+  · kprologue jump_table to ".Lcase0" with s₀
+    subst h2
+    kstep
+    simp +zetaDelta only [Int64.ofInt_bitVecToInt]
+    kprologue jump_table at ".Lcase2"
+    kfinish jump_table
