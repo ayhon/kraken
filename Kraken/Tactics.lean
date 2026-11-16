@@ -13,9 +13,11 @@ public meta section
 
 open Lean Meta Elab Tactic Kraken
 
-/-- Set up a straight-line proof for `p` from `s`, naming the state fields and
-general-purpose registers. `status` and `dmem` are called `flags` and `mem`. -/
-syntax (name := kprologue) "kprologue" ident "with" ident : tactic
+/-- Set up a straight-line proof from a `straightlineStep (layout p) ⟨s, _⟩ _` goal,
+binding `p` to a local `let` variable (named via `as <ident>`, or `prog` by default)
+and destructuring `s` into its state fields and general-purpose registers
+(`status` and `dmem` are called `flags` and `mem`). -/
+syntax (name := kprologue) "kprologue" ("as" ident)? : tactic
 
 private def kprologueBinderName (field : Lean.Name) : Lean.Name :=
   if field == `status then `flags
@@ -23,29 +25,45 @@ private def kprologueBinderName (field : Lean.Name) : Lean.Name :=
   else field
 
 elab_rules : tactic
-  | `(tactic| kprologue $p:ident with $s:ident) => withMainContext do
+  | `(tactic| kprologue $[as $pName?:ident]?) => withMainContext do
+      let ref ← getRef
       let env ← getEnv
-      let state ← Term.elabTerm s none
+      let target ← instantiateMVars (← getMainTarget)
+      unless target.isApp && target.getAppFn.isConstOf `straightlineStep && target.getAppNumArgs == 4 do
+        throwError "kprologue: expected goal of the form `straightlineStep (layout <prog>) ⟨<state>, _⟩ _`"
+      let exe := target.getArg! 1
+      let_expr Kraken.Layout.apply _ _ _ pExpr := exe
+        | throwError "kprologue: expected executable of the form `layout <prog>` in goal"
+      let machState := target.getArg! 2
+      unless machState.isApp && machState.getAppFn.isConstOf `MachineState.mk && machState.getAppNumArgs == 2 do
+        throwError "kprologue: expected machine state of the form `⟨<state>, _⟩` in goal"
+      let state := machState.getArg! 0
+      let .fvar stateFVarId := state
+        | throwError "kprologue: expected state in `⟨<state>, _⟩` to be a local variable"
+
       let stateType ← whnf (← inferType state)
       let some stateName := stateType.getAppFn.constName?
-        | throwErrorAt s "kprologue: expected a state with a structure type"
+        | throwError "kprologue: expected a state with a structure type"
       let some _ := getStructureInfo? env stateName
-        | throwErrorAt s "kprologue: `{stateName}` is not a structure"
+        | throwError "kprologue: `{stateName}` is not a structure"
 
       let stateFields := getStructureFields env stateName
       let some regsInfo := getFieldInfo? env stateName `regs
-        | throwErrorAt s "kprologue: `{stateName}` has no `regs` field"
+        | throwError "kprologue: `{stateName}` has no `regs` field"
       let regs ← mkAppM regsInfo.projFn #[state]
       let regsType ← whnf (← inferType regs)
       let some regsName := regsType.getAppFn.constName?
-        | throwErrorAt s "kprologue: `{stateName}.regs` does not have a structure type"
+        | throwError "kprologue: `{stateName}.regs` does not have a structure type"
       let some _ := getStructureInfo? env regsName
-        | throwErrorAt s "kprologue: `{stateName}.regs` is not a structure"
+        | throwError "kprologue: `{stateName}.regs` is not a structure"
 
       let regFields := getStructureFields env regsName
       let stateBinderNames :=
         (stateFields.filter (· != `regs)).map kprologueBinderName
-      let binderNames := regFields ++ stateBinderNames
+      let progBinderNames := match pName? with
+        | some id => #[id.getId]
+        | none => #[]
+      let binderNames := progBinderNames ++ regFields ++ stateBinderNames
 
       let mut seen : NameSet := {}
       let mut duplicateNames := #[]
@@ -57,40 +75,49 @@ elab_rules : tactic
           seen := seen.insert name
       unless duplicateNames.isEmpty do
         let names := String.intercalate ", " (duplicateNames.toList.map (·.toString))
-        throwErrorAt s "kprologue: duplicate local names: {names}"
+        throwError "kprologue: duplicate local names: {names}"
 
       let lctx ← getLCtx
       let collisions := binderNames.filter fun name =>
         (lctx.findFromUserName? name).isSome
       unless collisions.isEmpty do
         let names := String.intercalate ", " (collisions.toList.map (·.toString))
-        throwErrorAt s
+        throwError
           "kprologue: refusing to shadow existing locals: {names}"
 
       -- These binders must remain visible after the tactic, so give them no macro scopes.
       let regPats ← regFields.mapM fun field =>
-        let id := mkIdentFrom s field
+        let id := mkIdentFrom ref field
         `(rcasesPat| $id:ident)
       let regsPat ← `(rcasesPat| ⟨$[$regPats],*⟩)
       let statePats ← stateFields.mapM fun field =>
         if field == `regs then
           pure regsPat
         else
-          let id := mkIdentFrom s (kprologueBinderName field)
+          let id := mkIdentFrom ref (kprologueBinderName field)
           `(rcasesPat| $id:ident)
       let statePat ← `(rcasesPat| ⟨$[$statePats],*⟩)
 
+      let progId : Ident := match pName? with
+        | some id => id
+        | none => mkIdentFrom ref (lctx.getUnusedName `prog)
+      let pType ← inferType pExpr
+      let targetAbst ← kabstract target pExpr
+      let mvarId ← getMainGoal
+      let (progFVarId, mvarId) ← (← mvarId.define progId.getId pType pExpr).intro1P
+      let mvarId ← mvarId.withContext do
+        let newTarget := targetAbst.instantiate1 (mkFVar progFVarId)
+        mvarId.replaceTargetDefEq newTarget
+      replaceMainGoal [mvarId]
+
+      let stateDecl ← stateFVarId.getDecl
+      let s := mkIdentFrom ref stateDecl.userName
       let straightlineStepId := mkIdent `straightlineStep
-      let execStraightlineId := mkIdent `Executable.straightline
 
       evalTactic (← `(tactic|
         (let ss := $s
          change ($straightlineStepId:ident _ ⟨ss, _⟩ _)
-         obtain $statePat:rcasesPat := $s
-         delta $p
-         dsimp only [$straightlineStepId:ident, $execStraightlineId:ident]
-         rw [Executable.directivesFromStart]
-         simp [List.mapIdx, List.mapIdx.go])))
+         obtain $statePat:rcasesPat := $s)))
 
 --------------------------------------------------------------------------------
 
@@ -311,6 +338,61 @@ def rwTarget (goal: Grind.Goal) (symm : Bool) (term : Expr) : Grind.GrindTacticM
         return { goal with mvarId }
     pure ({ goal with mvarId }, sideGoals)
 
+private partial def extractDirectiveList (e : Expr) : MetaM (Option (Expr × Array Expr)) :=
+  withTransparency .default do
+    let rec loop (curr : Expr) (acc : Array Expr) : MetaM (Option (Expr × Array Expr)) := do
+      match_expr ← whnf curr with
+      | List.nil elemType => return some (elemType, acc)
+      | List.cons _ d tail => loop tail (acc.push d)
+      | _ => return none
+    loop e #[]
+
+private def unfoldStraightlineGoal (goal : Grind.Goal) : Grind.GrindTacticM Grind.Goal :=
+  goal.withContext do
+    let target ← instantiateMVars (← goal.mvarId.getType)
+    let_expr gimmickId body := target | return goal
+    unless body.isApp && body.getAppFn.isConstOf `straightlineStep && body.getAppNumArgs == 4 do
+      return goal
+    let exe := body.getArg! 1
+    let_expr Kraken.Layout.apply instrType constType layoutInst prog := exe
+      | return goal
+    let some (_, directives) ← extractDirectiveList prog
+      | return goal
+    -- Unfold straightlineStep and Executable.straightline
+    let some allExpr ← Meta.unfoldDefinition? body | return goal
+    let .app allFnPost straightlineApp := allExpr | return goal
+    let some straightlineExpr ← Meta.unfoldDefinition? straightlineApp | return goal
+    let interpRaw := match straightlineExpr with
+      | .letE _ _ val b _ => b.instantiate1 val
+      | e => e
+    let preTarget ← Grind.liftSymM <| Sym.preprocessExpr (mkApp (mkConst ``gimmickId) (mkApp allFnPost interpRaw))
+    let mvarId ← goal.mvarId.replaceTargetDefEq preTarget
+    let goal := { goal with mvarId }
+    -- Rewrite (layout prog).directivesFromAddress layout.start -> (layout prog).program
+    let (goal, _) ← rwTarget goal false (mkConst ``Kraken.Executable.directivesFromStart)
+    goal.withContext do
+      let target2 ← instantiateMVars (← goal.mvarId.getType)
+      let_expr gimmickId body2 := target2 | return goal
+      let .app allFnPost2 interpExpr := body2 | return goal
+      unless interpExpr.isApp && interpExpr.getAppNumArgs == 5 do return goal
+      let interpArgs := interpExpr.getAppArgs
+      let dirType := mkApp2 (mkConst ``Kraken.Directive) instrType constType
+      let sizedDirType := mkApp (mkConst ``Kraken.Sized [1]) dirType
+      let nilSized := mkApp (mkConst ``List.nil [0]) sizedDirType
+      let mut listExpr := nilSized
+      for i in [:directives.size] do
+        let idx := directives.size - 1 - i
+        let d := directives[idx]!
+        let idxLit := mkNatLit idx
+        let sizeExpr := mkApp4 (mkConst ``Kraken.Layout.size) instrType constType layoutInst idxLit
+        let sizedElem := mkApp3 (mkConst ``Kraken.Sized.mk [1]) dirType d sizeExpr
+        listExpr := mkApp3 (mkConst ``List.cons [0]) sizedDirType sizedElem listExpr
+      let interpExpr' := mkAppN interpExpr.getAppFn (interpArgs.set! 1 listExpr)
+      let body2' := mkApp allFnPost2 interpExpr'
+      let newTarget ← Grind.liftSymM <| Sym.preprocessExpr (mkApp (mkConst ``gimmickId) body2')
+      let mvarId ← goal.mvarId.replaceTargetDefEq newTarget
+      return { goal with mvarId }
+
 @[grind_tactic symKStep]
 partial def evalSymKStep : Grind.GrindTactic :=
   fun stx : Syntax => do
@@ -366,6 +448,7 @@ partial def evalSymKStep : Grind.GrindTactic :=
 
   -- MAIN LOOP
   let rec go (goal: Grind.Goal): Grind.GrindTacticM (Grind.Goal × List Grind.Goal) := do
+    let goal ← unfoldStraightlineGoal goal
     -- STEP 1: dsimp
     let goal ← do
       let mvarId ← goal.mvarId.replaceTargetDefEq (← Grind.liftGrindM $

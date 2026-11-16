@@ -31,7 +31,7 @@ def p1 := ⸨prog| start: mov $1, %rax ⸩
 
 -- Super-simple example to debug tactics
 example [layout : Layout] s : straightlineStep (layout p1) ⟨s, layout.start⟩ (fun s => s.1.regs.rax = 1) := by
-  kprologue p1 with s
+  kprologue
   sym => kstep; tactic =>
   decide
   /- simp [Instr.interp,Operation.interp,Operand.interp,MachineData.set] -/
@@ -51,7 +51,7 @@ theorem swap_correct [layout : Layout] (d : MachineData) :
           s'.1.regs.get Reg.rbx = d.regs.get Reg.rax)
       ⟨d, layout.start⟩ := by
   apply step_cps
-  kprologue swap with d
+  kprologue
   sym => kstep; tactic =>
   apply Eventually.done
   grind
@@ -67,7 +67,7 @@ start:
 -- Example 2: stepping through both straightline and control instructions
 example [layout : Layout] (s : MachineData): Eventually (straightlineStep (layout p2)) (fun s => s.1.regs.rax = 2) ⟨s, layout.start⟩ := by
   apply step_cps
-  kprologue p2 with s
+  kprologue
   sym =>
   kstep
   tactic =>
@@ -107,7 +107,7 @@ theorem p3_correct [layout: Layout] (s: MachineData):
   by
     intros h_bounds
     apply step_cps
-    kprologue p3 with s
+    kprologue
 
     sym =>
     -- kstep 3
@@ -202,7 +202,7 @@ dec %rax⸩
 
 -- Super-simple example to debug tactics
 example [layout : Layout] s : straightlineStep (layout p4) ⟨s, layout.start⟩ (fun s => s.1.regs.rax = 1) := by
-  kprologue p4 with s
+  kprologue
   sym =>
   kstep
   -- intros
@@ -221,7 +221,7 @@ set_option pp.rawOnError true
 /- set_option pp.all true -/
 
 example [layout : Layout] s : straightlineStep (layout p5) ⟨s, layout.start⟩ (fun s => s.1.regs.rax = 0) := by
-  kprologue p5 with s
+  kprologue
   sym => kstep; tactic =>
   bv_decide
 
@@ -261,7 +261,7 @@ theorem p6_correct [layout : Layout] (s₀ : MachineData)
       (fun s' => s'.1.regs.rax = s₀.regs.rax ∧ s'.1.regs.rsp = s₀.regs.rsp)
       ⟨s₀, layout.start⟩ := by
   apply step_cps
-  kprologue p6 with s₀
+  kprologue
   have h_bs : stack.length = 8 := h_len
   have h_mem1 := Mem.storeInt_sep (rsp.toBitVec - 8#64) 8 stack R mem ⟨h_mem, h_bs⟩ rax.toBitVec.toInt
   sym =>
@@ -308,7 +308,7 @@ theorem p7_correct [layout : Layout] (s₀ : MachineData) (R : DataMem → Prop)
       ← BitVec.signExtend_eq_setWidth_of_le _ (by decide)]
     simp [BitVec.ofInt, BitVec.signExtend]
   apply step_cps
-  kprologue p7 with s₀
+  kprologue
   sym =>
   kstep
   case h_mem => tactic => dsimp only; rw [h_addr]; exact h_mem
@@ -378,7 +378,7 @@ theorem move_2_regs_to_heap_correct [layout : Layout] (s₀ : MachineData)
         s'.1.regs.rdi = s₀.regs.rdi)
       ⟨s₀, layout.start⟩ := by
   apply step_cps
-  kprologue move_2_regs_to_heap with s₀
+  kprologue
 
   have h_bs1 : v1.toBytes.length = 8 := UInt64.toBytes_length v1
   have h_bs2 : v2.toBytes.length = 8 := UInt64.toBytes_length v2
@@ -425,7 +425,7 @@ theorem sib_example_correct [layout : Layout] (s₀ : MachineData)
       (fun s' => s'.1.regs.rax = 42)
       ⟨s₀, layout.start⟩ := by
   apply step_cps
-  kprologue sib_example with s₀
+  kprologue
   have h_bs : v.toBytes.length = 8 := UInt64.toBytes_length v
   simp at h_mem
   have h_mem' := Mem.storeInt_sep (rdi.toBitVec + BitVec.ofInt 64 (r15.toBitVec.toInt * 8)) 8 v.toBytes R mem ⟨h_mem, h_bs⟩ 42
@@ -454,7 +454,7 @@ theorem alu_mem_example_correct [layout : Layout] (s₀ : MachineData)
       (fun s' => s'.1.regs.rcx = 142)
       ⟨s₀, layout.start⟩ := by
   apply step_cps
-  kprologue alu_mem_example with s₀
+  kprologue
   have h_bs : v.toBytes.length = 8 := UInt64.toBytes_length v
   have h_mem1 := Mem.storeInt_sep (rdx.toBitVec + 136#64) 8 v.toBytes R mem ⟨h_mem, h_bs⟩ 42
   sym =>
@@ -488,10 +488,10 @@ theorem dynamic_stack_example_correct [layout : Layout] (s₀ : MachineData)
     (h : s₀.regs.r9.toNat + s₀.regs.r15.toNat < 125)
     (h_mem : s₀.dmem =⋆ Eq (stack.At (s₀.regs.rsp.toBitVec - 1024)) ⋆ R) :
     Eventually (straightlineStep (layout dynamic_stack_example))
-      (fun s' => s'.1.regs.rax = 42 ∧ s'.1.regs.rbx = 99 ∧ s'.1.regs.rsp = s₀.regs.rsp)
+       (fun s' => s'.1.regs.rax = 42 ∧ s'.1.regs.rbx = 99 ∧ s'.1.regs.rsp = s₀.regs.rsp)
       ⟨s₀, layout.start⟩ := by
   apply step_cps
-  kprologue dynamic_stack_example with s₀
+  kprologue
   have h_bs : stack.length = 1024 := lstack
   have h_take_drop : stack = stack.take 1016 ++ stack.drop 1016 := by exact (List.take_append_drop 1016 stack).symm
   rw [h_take_drop] at h_mem

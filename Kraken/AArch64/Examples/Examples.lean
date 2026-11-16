@@ -53,7 +53,7 @@ theorem swap_correct [layout : Layout] (d : MachineData) :
     (fun s' =>
         s'.1.regs.getRegOrZr .X0 = d.regs.getRegOrZr .X1 ∧
         s'.1.regs.getRegOrZr .X1 = d.regs.getRegOrZr .X0) := by
-  kprologue swap with d
+  kprologue
   sym => kstep; tactic =>
   grind
 
@@ -67,7 +67,7 @@ def arith_shift : Program := ⸨prog|
 theorem arith_shift_correct [layout : Layout] (d : MachineData) :
     straightlineStep (layout arith_shift) ⟨d, layout.start⟩ (fun s' =>
       s'.1.regs.getRegOrZr .X3 = 3 * (d.regs.getRegOrZr .X1 + 42)) := by
-  kprologue arith_shift with d
+  kprologue
   sym => kstep; tactic =>
   simp (config := { zetaDelta := true }) only [show BitVec.ofInt 64 (Int64.toInt 42) = 42#64 from rfl,
     show (Int64.toInt 0).toNat = 0 from rfl]
@@ -87,7 +87,7 @@ theorem p4_correct [layout : Layout] (d : MachineData) :
       (fun s' => s'.1.regs.X1 = 42)
       ⟨d, layout.start⟩ := by
   apply step_cps
-  kprologue controlflow with d
+  kprologue
   sym => kstep; tactic =>
   rename_i v v1
   have : v1 = 0 := by grind
@@ -119,7 +119,7 @@ theorem move_2_regs_to_heap_correct [layout : Layout] (s₀ : MachineData)
         s'.1.regs.X2 = s₀.regs.X2)
       ⟨s₀, layout.start⟩ := by
   apply step_cps
-  kprologue move_2_regs_to_heap with s₀
+  kprologue
 
   have h_bs1 : v1.toBytes.length = 8 := UInt64.toBytes_length v1
   have h_bs2 : v2.toBytes.length = 8 := UInt64.toBytes_length v2
@@ -163,7 +163,7 @@ theorem reg_offset_example_correct [layout : Layout] (s₀ : MachineData)
       (fun s' => s'.1.regs.X3 = 42)
       ⟨s₀, layout.start⟩ := by
   apply step_cps
-  kprologue reg_offset_example with s₀
+  kprologue
   have h_bs : v.toBytes.length = 8 := UInt64.toBytes_length v
   simp at h_mem
   have h_mem' := Mem.storeInt_sep (X1.toBitVec + BitVec.ofInt 64 (X2.toBitVec.toNat <<< 3)) 8 v.toBytes R mem ⟨h_mem, h_bs⟩ 42
