@@ -14,6 +14,10 @@ globs = ["Kraken.*"]  # TODO: move the tests out of `Kraken`
 [[lean_lib]]
 name = "KrakenAArch64"
 
+[[lean_lib]]
+name = "Lens"
+globs = ["Lens.*"]
+
 [[lean_exe]]
 name = "krakenrunner_x64"
 root = "KrakenRunnerX64"
