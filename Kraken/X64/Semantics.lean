@@ -378,7 +378,7 @@ abbrev AddressBound := Fin (UInt64.size + 1)
 inductive Effects
   | done (a : MachineState)
   | unimplemented (msg : String)
-  | resolve_label (lbl : Label) (k : Int64 → Effects)
+  | unresolved_label (lbl : Label)
   | gp_unaligned (addr : BitVec 64) (w : Nat)
   -- loads and stores *outside* the data memory, eg. MMIO, might still affect the data memory:
   -- for instance, MMIO reads/writes at certain device register addresses might change what
@@ -389,7 +389,7 @@ inductive Effects
   | require_read_access (span : Std.Rco AddressBound) (ok : Unit → Effects)
   | require_write_access (span : Std.Rco AddressBound) (ok : Unit → Effects)
   | require_exec_access (p: Std.Rco Int64) (ok : Unit → Effects)
-export Effects (unimplemented resolve_label nonmem_load nonmem_store undefined require_read_access require_write_access require_exec_access)
+export Effects (unimplemented unresolved_label nonmem_load nonmem_store undefined require_read_access require_write_access require_exec_access)
 
 -- Splits the interval in two halves in case of overflow
 def require_access (access : Std.Rco AddressBound → (Unit → Effects) → Effects)
@@ -465,14 +465,86 @@ def MachineData.storeAvx (s : MachineData) (addr : BitVec 64) {w : AvxWidth} (v 
           ret { s with dmem := Mem.storeInt s.dmem addr w.bytes v.toInt }
       | .none => unimplemented "AVX nonmem store not supported")
 
+@[kstep, simp] def ConstExpr.usedLabels : ConstExpr → List Label
+  | .label l => [l]
+  | .int64 _ | .before_current_instruction | .after_current_instruction => []
+  | .add e1 e2 | .sub e1 e2 => e1.usedLabels ++ e2.usedLabels
+
+@[kstep, simp] def AddrExpr.usedLabels (a : AddrExpr) : List Label := a.disp.usedLabels
+
+@[kstep, simp] def RegOrMem.usedLabels {w} : RegOrMem w → List Label
+  | .reg _ => []
+  | .mem a => a.usedLabels
+
+@[kstep, simp] def AvxRegOrMem.usedLabels {w} : AvxRegOrMem w → List Label
+  | .avx _ => []
+  | .mem a => a.usedLabels
+
+@[kstep, simp] def Operand.usedLabels {w} : Operand w → List Label
+  | .regOrMem rm => rm.usedLabels
+  | .imm v => v.usedLabels
+
+@[kstep, simp] def AvxOperand.usedLabels {w} : AvxOperand w → List Label
+  | .regOrMem rm => rm.usedLabels
+
+@[kstep, simp] def ShiftCountExpr.usedLabels : ShiftCountExpr → List Label
+  | .cl => []
+  | .imm8 v => v.usedLabels
+
+@[kstep, simp] def RelRegOrMem.usedLabels : RelRegOrMem → List Label
+  | .rel c => c.usedLabels
+  | .reg _ => []
+  | .mem a => a.usedLabels
+
+@[kstep, simp] def Operation.usedLabels {w} : Operation w → List Label
+  | .mov dst src | .add dst src | .adc dst src | .sub dst src | .sbb dst src
+  | .and dst src | .or dst src | .xor dst src => dst.usedLabels ++ src.usedLabels
+  | .movsx dst src | .movzx dst src => dst.usedLabels ++ src.usedLabels
+  | .push src => src.usedLabels
+  | .pop dst | .setcc _ dst | .inc dst | .dec dst | .neg dst | .not dst => dst.usedLabels
+  | .cmovcc _ _ src | .adcx _ src | .adox _ src | .mul src | .mulx _ _ src | .imul1 src => src.usedLabels
+  | .lea _ src => src.usedLabels
+  | .cmp a b | .test a b => a.usedLabels ++ b.usedLabels
+  | .imul dst src1 src2 => (dst.map (·.usedLabels) |>.getD []) ++ src1.usedLabels ++ src2.usedLabels
+  | .shl dst count | .shr dst count | .sar dst count
+  | .shld dst _ count | .shrd dst _ count
+  | .rol dst count | .ror dst count | .rcl dst count | .rcr dst count => dst.usedLabels ++ count.usedLabels
+  | .jcc _ target => [target]
+  | .jmp target | .call target => target.usedLabels
+  | .movs _ | .stos _ | .bswap _ | .cld | .std | .ret | .nop _ | .nopalign _ _ => []
+
+@[kstep, simp] def AvxOperation.usedLabels {w} : AvxOperation w → List Label
+  | .movups dst src | .vmovups dst src | .movaps dst src | .subps dst src | .addps dst src
+  | .movdqu dst src | .movdqa dst src | .paddd dst src | .pshufb dst src | .vmovdqu dst src
+  | .sha256rnds2 dst src | .sha256msg1 dst src | .sha256msg2 dst src
+  | .vmovdqu32 dst src | .vmovdqa32 dst src => dst.usedLabels ++ src.usedLabels
+  | .pshufd dst src imm | .palignr dst src imm | .pblendw dst src imm
+  | .vprord dst src imm | .vpsrld dst src imm => dst.usedLabels ++ src.usedLabels ++ imm.usedLabels
+  | .vmovIn _ _ src => src.usedLabels
+  | .vmovOut _ dst _ => dst.usedLabels
+  | .vmovq _ _ | .vzeroupper => []
+  | .vpaddd dst src1 src2 => dst.usedLabels ++ src1.usedLabels ++ src2.usedLabels
+  | .vpternlogd dst src2 src3 imm => dst.usedLabels ++ src2.usedLabels ++ src3.usedLabels ++ imm.usedLabels
+
+@[kstep, simp] def Instr.usedLabels : Instr → List Label
+  | .regular _ _ op => op.usedLabels
+  | .avx _ _ op => op.usedLabels
+
+@[kstep, simp] def Directive.usedLabels : Directive → List Label
+  | .instr i => i.usedLabels
+  | .label _ | .byteArray _ | .word _ _ => []
+
 class Labels where label? : Label → Option Int64
-export Labels (label?)
 
 def Labels.label! [Labels] (l : Label) : Int64 :=
   match label? l with
   | .some a => a
   | .none => panic! s!"unresolved label: {l}"
-export Labels (label!)
+
+export Labels (label! label?)
+
+@[instance_reducible]
+def Labels.restrict (ls : List Label) [Labels] : Labels where label? lbl := if lbl ∈ ls then label? lbl else none
 
 @[grind =]
 theorem Labels.label!_eq_get!_label? {_ : Labels} (l : Label) :
@@ -485,10 +557,27 @@ theorem Labels.label!_of_label? {_ : Labels} {l : Label} {a : Int64} (h : label?
     label! l = a := by
   simp [label!, h]
 
+section Interpetation
+variable [lbls : Labels]
+
+abbrev Label.resolve (lbl : Label) (ret : Int64 → Effects) : Effects :=
+  match label? lbl with
+  | .some addr => ret addr
+  | .none => .unresolved_label lbl
+
+/-- Fail with `unresolved_label` on the first label of `ls` that does not resolve,
+otherwise continue with `k`. -/
+@[kstep] def Labels.check (ls : List Label) (k : Unit → Effects) : Effects :=
+  match ls with
+  | [] => k ()
+  | l :: ls => match label? l with
+    | .some _ => Labels.check ls k
+    | .none => .unresolved_label l
+
 @[kstep] def ConstExpr.interp (e : ConstExpr) (p : Std.Rco _root_.Int64)
     (ret : _root_.Int64 → Effects) : Effects :=
   match e with
-  | .label l => .resolve_label l ret
+  | .label l => l.resolve ret
   | .int64 i => ret i
   | .before_current_instruction => ret p.lower
   | .after_current_instruction => ret p.upper
@@ -929,7 +1018,7 @@ set_option maxHeartbeats 1000000
     | _ => undefined (fun v => next (s.setReg dst v))
   | .jcc cc l =>
     if cc.interp s.status
-    then .resolve_label l (jmp · s)
+    then l.resolve (jmp · s)
     else next s
   | .jmp tgt =>
     tgt.interp s p (fun a s =>
@@ -1055,7 +1144,9 @@ def Instr.interp
   (next : MachineData → Effects) (jmp : Int64 → MachineData → Effects) : Effects :=
   match d with
   | .label _ => next s
-  | .instr i => i.interp s p next jmp
+  | .instr i =>
+    Labels.check d.usedLabels (lbls := lbls.restrict d.usedLabels) fun _ =>
+      i.interp s p next jmp (lbls := lbls.restrict d.usedLabels)
   | .byteArray bs =>
     if bs.isEmpty then next s
     else .unimplemented s!"Unimplemented: execution reached data block at {p.1}"
@@ -1085,6 +1176,10 @@ theorem inert_of_size_zero {prog : Program} [layout : Layout prog] {i : Nat} {d 
   | byteArray bs => simp [Directive.interp, ByteArray.isEmpty, show bs.size = 0 from hz]
   | word bytes _ => simp [Directive.interp, show bytes = 0 from hz]
 
+end Interpetation
+
+open Kraken (Layout WellFormedLayout)
+
 @[instance_reducible]
 def Executable.labels (e : Executable) : Labels :=
   { label? l := e.withAddresses.findSome?
@@ -1094,6 +1189,7 @@ def Executable.directivesFromLabel (e : Executable) (l : Label) : List (Kraken.S
   e.program.dropWhile (·.directive != .label l)
 
 def Executable.step (e : Executable) (s : MachineState) (ret : MachineState → Effects) : Effects :=
+  letI := e.labels
   Directives.interp (e.directivesAtAddress s.pc) s.data s.pc (fun pc s => ret ⟨s, pc⟩)
 
 -- -- Concrete evaluators for expedient testing
@@ -1105,10 +1201,7 @@ where
     match es with
     | .done s => eval e s until_
     | .unimplemented msg => .error msg
-    | .resolve_label lbl k =>
-      match e.labels.label? lbl with
-      | .some a => handleEffects (k a)
-      | .none => .error s!"unresolved label: {lbl}"
+    | .unresolved_label lbl => .error s!"unresolved label: {lbl}"
     | .gp_unaligned addr w => .error s!"#GP: Memory op at {repr addr} did not have mandatory alignment of {w}"
     | .require_read_access _ ok => handleEffects (ok ())
     | .require_write_access _ ok => handleEffects (ok ())

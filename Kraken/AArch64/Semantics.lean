@@ -171,7 +171,7 @@ structure MachineState where
 inductive Effects
   | done (a : MachineState)
   | unimplemented (msg : String)
-  | resolve_label (lbl : Label) (k : Int64 → Effects)
+  | unresolved_label (lbl : Label)
   -- loads and stores *outside* the data memory, eg. MMIO, might still affect the data memory:
   -- for instance, MMIO reads/writes at certain device register addresses might change what
   -- data memory the process logically owns vs what memory is owned by devices
@@ -182,7 +182,7 @@ inductive Effects
   | require_write_access (addr : BitVec 64) (w : MemWidth) (ok : Unit → Effects)
   | require_exec_access (p: Std.Rco Int64) (ok : Unit → Effects)
   | unaligned_sp {w : RegWidth} (sp : w.type)
-export Effects (unimplemented resolve_label nonmem_load nonmem_store undefined require_read_access require_write_access require_exec_access)
+export Effects (unimplemented unresolved_label nonmem_load nonmem_store undefined require_read_access require_write_access require_exec_access)
 
 -- the unused `Std.Rco Int64` argument and the unmodified `MachineData` return
 -- value are present for uniformity with RegOrMem.interp
@@ -221,14 +221,71 @@ def MachineData.store (s : MachineData) (addr : BitVec 64) {w : MemWidth} (v : w
         ret { s with dmem := Mem.storeInt s.dmem addr w.bytes v.toInt }
     | .none => nonmem_store s.dmem addr v (fun dmem' => ret { s with dmem := dmem' }))
 
+@[kstep, simp] def ConstExpr.usedLabels : ConstExpr → List Label
+  | .label l => [l]
+  | .int64 _ | .before_current_instruction | .after_current_instruction => []
+  | .add e1 e2 | .sub e1 e2 => e1.usedLabels ++ e2.usedLabels
+  | .pg_hi21 e | .lo12 e => e.usedLabels
+
+@[kstep, simp] def ImmExpr.usedLabels (i : ImmExpr) : List Label := i.imm.usedLabels
+
+@[kstep, simp] def ExtOrImmReg.usedLabels : ExtOrImmReg → List Label
+  | .ext _ => []
+  | .imm i => i.usedLabels
+
+@[kstep, simp] def AddrOff.usedLabels : AddrOff → List Label
+  | .imm i => i.imm.usedLabels
+  | .reg _ => []
+
+@[kstep, simp] def AddrExpr.usedLabels (a : AddrExpr) : List Label := a.off.usedLabels
+
+@[kstep, simp] def UnscaledAddrExpr.usedLabels (a : UnscaledAddrExpr) : List Label := a.imm.usedLabels
+
+@[kstep, simp] def Literal.usedLabels : Literal → List Label
+  | .addr a => [a.label]
+  | .pool e => e.expr.usedLabels
+
+@[kstep, simp] def AddrOrLit.usedLabels : AddrOrLit → List Label
+  | .addr a => a.usedLabels
+  | .lit l => l.usedLabels
+
+@[kstep, simp] def Operation.usedLabels {w} : Operation w → List Label
+  | .LDR _ src | .LDRSW _ src => src.usedLabels
+  | .STR _ a | .LDP _ _ a | .STP _ _ a | .LDRB _ a | .STRB _ a | .LDRSB _ a | .LDRH _ a
+  | .STRH _ a | .LDRSH _ a | .LDPSW _ _ a => a.usedLabels
+  | .LDUR _ a | .STUR _ a | .LDURB _ a | .STURB _ a | .LDURSB _ a | .LDURH _ a | .STURH _ a
+  | .LDURSH _ a | .LDURSW _ a => a.usedLabels
+  | .ADD_e _ _ src | .ADDS_e _ _ src | .SUB_e _ _ src | .SUBS_e _ _ src => src.usedLabels
+  | .AND_i _ _ imm | .ANDS_i _ _ imm | .ORR_i _ _ imm | .EOR_i _ _ imm => imm.usedLabels
+  | .MOVZ _ imm _ | .MOVK _ imm _ | .MOVN _ imm _ => imm.usedLabels
+  | .ADR _ target | .ADRP _ target | .B target | .B_cond _ target | .BL target
+  | .CBZ _ target | .CBNZ _ target | .TBZ _ _ target | .TBNZ _ _ target => target.usedLabels
+  | _ => []
+
+@[kstep, simp] def Instr.usedLabels (i : Instr) : List Label := i.operation.usedLabels
+
+@[kstep, simp] def Directive.usedLabels : Directive → List Label
+  | .instr i => i.usedLabels
+  | .label _ | .byteArray _ | .word _ _ => []
+
 class Labels where label? : Label → Option Int64
-export Labels (label?)
 
 def Labels.label! [Labels] (l : Label) : Int64 :=
   match label? l with
   | .some a => a
   | .none => panic! s!"unresolved label: {l}"
-export Labels (label!)
+
+abbrev Labels.labelE [Labels] (l : Label) : Except Label Int64 :=
+  match label? l with
+  | .some a => .ok a
+  | .none => .error l
+
+export Labels (label! label? labelE)
+
+/-- Only the labels in `ls` resolve. -/
+@[instance_reducible]
+def Labels.restrict (ls : List Label) [Labels] : Labels where
+  label? lbl := if lbl ∈ ls then label? lbl else none
 
 @[grind =]
 theorem Labels.label!_eq_get!_label? {_ : Labels} (l : Label) :
@@ -241,23 +298,45 @@ theorem Labels.label!_of_label? {_ : Labels} {l : Label} {a : Int64} (h : label?
     label! l = a := by
   simp [label!, h]
 
-@[kstep] def ConstExpr.interp (e : ConstExpr) (p : Std.Rco Int64)
-    (ret : Int64 → Effects) : Effects :=
+attribute [kstep] Bind.bind Monad.toBind Except.instMonad Except.bind
+
+section Interpretation
+variable [lbls : Labels]
+
+abbrev Label.resolve (lbl : Label) (ret : Int64 → Effects) : Effects :=
+  match label? lbl with
+  | .some addr => ret addr
+  | .none => .unresolved_label lbl
+
+@[kstep] def ConstExpr.interpE (e : ConstExpr) (p : Std.Rco Int64) : Except Label Int64 := do
   match e with
-  | .label l => .resolve_label l ret
-  | .int64 i => ret i
-  | .before_current_instruction => ret p.lower
-  | .after_current_instruction => ret p.upper
-  | .add e1 e2 => e1.interp p (fun v1 => e2.interp p (fun v2 => ret (v1 + v2)))
-  | .sub e1 e2 => e1.interp p (fun v1 => e2.interp p (fun v2 => ret (v1 - v2)))
-  | .pg_hi21 e => e.interp p (fun v =>
+  | .label l => Labels.labelE l
+  | .int64 i => .ok i
+  | .before_current_instruction => .ok p.lower
+  | .after_current_instruction => .ok p.upper
+  | .add e1 e2 =>
+    let v1 ← e1.interpE p
+    let v2 ← e2.interpE p
+    .ok (v1 + v2)
+  | .sub e1 e2 =>
+    let v1 ← e1.interpE p
+    let v2 ← e2.interpE p
+    .ok (v1 - v2)
+  | .pg_hi21 e =>
+    let v ← e.interpE p
     let val := BitVec.ofInt 64 (Int64.toInt v)
     let page := val &&& ~~~0xFFF#64
-    ret (Int64.ofNat page.toNat))
-  | .lo12 e => e.interp p (fun v =>
+    .ok (Int64.ofNat page.toNat)
+  | .lo12 e =>
+    let v ← e.interpE p
     let val := BitVec.ofInt 64 (Int64.toInt v)
     let lo := val &&& 0xFFF#64
-    ret (Int64.ofNat lo.toNat))
+    .ok (Int64.ofNat lo.toNat)
+
+@[kstep] def ConstExpr.interp (e : ConstExpr) (p : Std.Rco Int64) (ret : Int64 → Effects) : Effects :=
+  match e.interpE p with
+  | .ok v => ret v
+  | .error lbl => Effects.unresolved_label lbl
 
 @[kstep] def ConstExpr.evalBranchTarget (target : ConstExpr) (p : Std.Rco Int64)
     (ret : Int64 → Effects) : Effects :=
@@ -388,7 +467,7 @@ theorem Labels.label!_of_label? {_ : Labels} {l : Label} {a : Int64} (h : label?
 @[kstep] def Literal.interpLoad {w : MemWidth} (expr : Literal) (s : MachineData) (p : Std.Rco Int64) (ret : w.type → MachineData → Effects) : Effects :=
   match expr with
   | .addr addr_expr => -- Load from address.
-    .resolve_label addr_expr.label (fun addr_val =>
+    addr_expr.label.resolve (fun addr_val =>
       let addr := BitVec.ofInt 64 (Int64.toInt addr_val)
       s.load addr w ret)
   | .pool litpool_expr => -- Bypass loading and return value directly.
@@ -972,7 +1051,7 @@ set_option maxHeartbeats 1000000
   (next : MachineData → Effects) (jmp : Int64 → MachineData → Effects) : Effects :=
   match d with
   | .label _ => next s
-  | .instr i => i.interp s p next jmp
+  | .instr i => i.interp s p next jmp (lbls := lbls.restrict d.usedLabels)
   | .byteArray bs =>
     if bs.isEmpty then next s
     else .unimplemented s!"Unimplemented: execution reached data block at {p.1}"
@@ -1002,6 +1081,10 @@ theorem inert_of_size_zero {prog : Program} [layout : Layout prog] {i : Nat} {d 
   | byteArray bs => simp [Directive.interp, ByteArray.isEmpty, show bs.size = 0 from hz]
   | word bytes _ => simp [Directive.interp, show bytes = 0 from hz]
 
+end Interpretation
+
+open Kraken (Layout WellFormedLayout)
+
 @[instance_reducible]
 def Executable.labels (e : Executable) : Labels :=
   { label? l := e.withAddresses.findSome?
@@ -1011,6 +1094,7 @@ def Executable.directivesFromLabel (e : Executable) (l : Label) : List (Kraken.S
   e.program.dropWhile (·.directive != .label l)
 
 def Executable.step (e : Executable) (s : MachineState) (ret : MachineState → Effects) : Effects :=
+  letI := e.labels
   Directives.interp (e.directivesAtAddress s.pc) s.data s.pc (fun pc s => ret ⟨s, pc⟩)
 
 -- -- Concrete evaluators for expedient testing
@@ -1022,10 +1106,7 @@ where
     match es with
     | .done s => eval e s until_
     | .unimplemented msg => .error msg
-    | .resolve_label lbl k =>
-      match e.labels.label? lbl with
-      | .some a => handleEffects (k a)
-      | .none => .error s!"unresolved label: {lbl}"
+    | .unresolved_label lbl => .error s!"unresolved label: {lbl}"
     | .require_read_access _ _ ok => handleEffects (ok ())
     | .require_write_access _ _ ok => handleEffects (ok ())
     | .require_exec_access _ ok => handleEffects (ok ())

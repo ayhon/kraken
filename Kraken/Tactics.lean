@@ -195,6 +195,16 @@ declare_term_config_elab elabKStepConfig KStepConfig
 
 syntax (name := symKStep) "kstep" optConfig (ppSpace num)? : grind
 
+/-- Reduce `[] ++ l` and `(x :: xs) ++ l`. `Labels.check` walks `Directive.usedLabels`, which is
+built with `++`, and `Append.append` does not unfold through the `List` instance. -/
+def kdsimpAppend : DSimproc := fun e => do
+  let_expr f@HAppend.hAppend α β γ inst xs ys := e | return .rfl
+  unless α.isAppOf ``List do return .rfl
+  match_expr xs with
+  | List.nil _ => return .step ys
+  | List.cons _ x xs' => return .step (← share (mkApp2 (mkConst ``List.cons xs.getAppFn.constLevels!) (α.getArg! 0) x |>.app (mkAppN f #[α, β, γ, inst, xs', ys])))
+  | _ => return .rfl
+
 def kdsimpMatch: DSimproc := fun e => do
   let some e' ← reduceRecMatcher? e | return .rfl
   -- Iota-reduction may expose kernel `Expr.proj` terms via struct-eta,
@@ -358,24 +368,28 @@ partial def evalSymKStep : Grind.GrindTactic :=
     | .letE _ _ _ body _ => getEffectsState body
     | .mdata _ e => getEffectsState e
     | _ =>
-      if e.isApp && e.getAppFn.isConstOf `Effects.All && e.getAppArgs.size == 3 then
-        some e.getAppArgs[2]!
+      if e.isApp && e.getAppFn.isConstOf `Effects.All && e.getAppArgs.size == 2 then
+        some e.getAppArgs.back!
       else
         none
 
   let resolveLabel? (goal : Grind.Goal) : Grind.GrindTacticM (Option Grind.Goal) := do
     let goalT ← goal.withContext do instantiateMVars (← goal.mvarId.getType)
     let_expr gimmickId goalT' := goalT | return none
-    let some labelApp := goalT'.find? (fun e =>
-      e.isAppOfArity `Labels.label? 2 &&
-      (e.getArg! 0).isAppOfArity `Executable.labels 1 &&
-      ((e.getArg! 0).getArg! 0).isAppOfArity ``Kraken.Layout.apply 4 &&
-      !(e.getArg! 1).hasLooseBVars)
+    -- Instructions run with the labels they mention: `Labels.restrict ls (Executable.labels exe)`.
+    let unwrapLabelsInst (e : Expr) : Option (Expr × Expr × Expr × Expr × Expr × Expr) := do
+      let mkApp2 (.const `Labels.label? _)
+        (mkApp2 (.const `Labels.restrict _) ls
+          (mkApp (.const `Executable.labels _)
+            (mkApp4 (.const ``Kraken.Layout.apply _) instrType constType p l)))
+        lbl := e
+       | none
+      some (lbl, ls, instrType, constType, p, l)
+    let some labelApp := goalT'.find? (fun e => Id.run do
+      let some (lbl, _) := (unwrapLabelsInst e) | false
+      !lbl.hasLooseBVars)
     | return none
-    let labelsInst := labelApp.getArg! 0
-    let lblExpr := labelApp.getArg! 1
-    let exe := labelsInst.getArg! 0
-    let_expr Kraken.Layout.apply instrType constType p l := exe | return none
+    let some (lblExpr, ls, instrType, constType, p, l) := unwrapLabelsInst labelApp | return none
     let some k ← goal.withContext (findLabelIdx? p lblExpr 0) | return none
     let goal ← goal.withContext do
       let isLabelPred ← mkAppOptM ``Kraken.Directive.isLabel #[some instrType, some constType, some lblExpr]
@@ -383,8 +397,10 @@ partial def evalSymKStep : Grind.GrindTactic :=
       let someK ← mkAppM ``Option.some #[mkNatLit k]
       let hkType ← mkEq findIdxExpr someK
       let hkProof ← mkExpectedTypeHint (← mkEqRefl someK) hkType
-      let heq ← mkAppOptM `label?_eq_some_addrOf
-        #[some p, some l, some lblExpr, some (mkNatLit k), some hkProof]
+      let memProp ← mkAppM ``Membership.mem #[ls, lblExpr]
+      let hmemProof ← mkDecideProof memProp
+      let heq ← mkAppOptM `label?_restrict_eq_some_addrOf
+        #[some p, some l, some ls, some lblExpr, some (mkNatLit k), some hmemProof, some hkProof]
       let r ← goal.mvarId.rewrite (← goal.mvarId.getType) heq false
       let eNew ← Grind.liftSymM <| Sym.preprocessExpr r.eNew
       let mvarId ← goal.mvarId.replaceTargetEq eNew r.eqProof
@@ -433,13 +449,13 @@ partial def evalSymKStep : Grind.GrindTactic :=
       let mvarId ← goal.mvarId.replaceTargetDefEq (← Grind.liftGrindM <|
         Sym.dsimp
           (config := { maxSteps := 1000000 })
-          (methods := { pre := klog >> kdsimpDecls >> kdsimpMatch >> kdsimpProj >> kbeta })
+          (methods := { pre := klog >> kdsimpDecls >> kdsimpMatch >> kdsimpAppend >> kdsimpProj >> kbeta })
           (← goal.mvarId.getType))
       let mvarId ← mvarId.replaceTargetDefEq (← Grind.liftGrindM <|
         Sym.dsimp
           (config := { maxSteps := 1000000 })
           (methods := {
-            pre := klog >> evalGround >> kdsimpDecls >> kdsimpMatch >> kdsimpProj >> kbeta })
+            pre := klog >> evalGround >> kdsimpDecls >> kdsimpMatch >> kdsimpAppend >> kdsimpProj >> kbeta })
           (← mvarId.getType))
       introsIf ({ goal with mvarId })
 

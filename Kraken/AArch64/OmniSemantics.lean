@@ -12,13 +12,10 @@ public import Kraken.OmniSemantics
 
 open Kraken (Layout WellFormedLayout)
 
-@[kstep] def Effects.All [Labels] (post : MachineState → Prop) : Effects → Prop
+@[kstep] def Effects.All (post : MachineState → Prop) : Effects → Prop
   | .done a => post a
   | .unimplemented _ => False
-  | .resolve_label lbl k =>
-    match label? lbl with
-    | .some a => (k a).All post
-    | .none => False
+  | .unresolved_label _ => False
   | .unaligned_sp .. => False
   | .nonmem_load .. => False
   | .nonmem_store .. => False
@@ -27,17 +24,10 @@ open Kraken (Layout WellFormedLayout)
   | .require_write_access _ _ cont => (cont ()).All post
   | .require_exec_access _ cont => (cont ()).All post
 
-@[ksimp] theorem Effects.All_resolve_label [Labels] (lbl : Label) (k : Int64 → Effects)
-    (post : MachineState → Prop) :
-    (Effects.resolve_label lbl k).All post =
-      (match label? lbl with | .some a => (k a).All post | .none => False) := by
-  rw [Effects.All]
-
 def step1 (e : Executable) (s : MachineState) (post : @Post MachineState) : Prop :=
-  letI := e.labels
   (Executable.step e s .done).All post
 
-theorem Directives.interp_directivesAtAddress_of_zeroSizePrefix
+theorem Directives.interp_directivesAtAddress_of_zeroSizePrefix [Labels]
     {p : Program} [l : Layout p] {pc : Int64} {rest : List (Kraken.Sized Directive)}
     (h : Kraken.ZeroSizePrefix (p.toExecutable.directivesAtAddress pc) rest)
     (s : MachineData) (ret : Int64 → MachineData → Effects) :
@@ -96,3 +86,11 @@ theorem label?_eq_some_addrOf {p : Program} [l : Layout p] {lbl : Label} {k : Na
     (hk : p.findIdx? (·.isLabel lbl) = some k) :
     @Labels.label? (Executable.labels p.toExecutable) lbl = some (p.toExecutable.addrOf k) :=
   Kraken.Layout.withAddresses_findSome?_label p lbl hk
+
+theorem label?_restrict_eq_some_addrOf {p : Program} [l : Layout p] {ls : List Label}
+    {lbl : Label} {k : Nat}
+    (hmem : lbl ∈ ls) (hk : p.findIdx? (·.isLabel lbl) = some k) :
+    @Labels.label? (@Labels.restrict ls (Executable.labels p.toExecutable)) lbl =
+      some (p.toExecutable.addrOf k) := by
+  unfold Labels.restrict
+  simp [hmem, label?_eq_some_addrOf hk]
