@@ -8,6 +8,7 @@ public import Lens.Family
 public import Lens.Derive
 public import Lens.Tactics.Disjoint
 public import Lens.Tactics.Frame
+public import Lens.Tactics.Eqs
 public import Lens.ExtraNotation
 
 /-!
