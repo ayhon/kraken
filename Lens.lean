@@ -11,6 +11,7 @@ public import Lens.Tactics.Frame
 public import Lens.Tactics.Eqs
 public import Lens.Tactics.Simp
 public import Lens.ExtraNotation
+public import Lens.Tactics.Notation
 
 /-!
 # Optics / Lenses Library
@@ -25,7 +26,15 @@ Umbrella module re-exporting:
 - `Lens.ProdFrame`: product-lens frames (`Modifies` over `×ₗ` and `Lens.unit`), `FactorsLawful`,
   and the unconditional closure algebra `ReflTransGen (Modifies …)`.
 - `Lens.Family`: indexed `LensFamily` / `LawfulLensFamily` and bridge theorems.
-- `Lens.Derive`: `make_lenses` command and `lens_disjoint` tactic.
-- `Lens.ExtraNotation`: scoped operators (`Optic.Notation`, `Optic.ProdNotation`), dot-path
-  resolution, `{ₗ st with … }`, and `st is { s₀ with … except … }`.
+- `Lens.Derive`: `make_lenses` command and `lensFieldExt` field-lens metadata registry.
+- `Lens.Tactics.Disjoint`: path-aware `lens_disjoint` / `lens_indep` tactics and `@[lens_disjoint]`
+  / `@[lens_indep]` extensible attributes.
+- `Lens.Tactics.Frame`: `lens_frame` tactic (symbolic diffs, frame-algebra graph search, and
+  `EqOn`/`EqOnAll` narrowing).
+- `Lens.Tactics.Eqs`: demand-driven `lens_eqs`, `lens_rw` simproc, and `frameEqsFor` /
+  `frameEqsInContext` APIs.
+- `Lens.Tactics.Simp`: `lens_simp`, `lens_dsimp`, and `@[lens_simp]` optic normalization.
+- `Lens.ExtraNotation` & `Lens.Tactics.Notation`: scoped operators (`Optic.Notation`,
+  `Optic.ProdNotation`), dot-path elaboration for `^.`, `{ₗ … with … }`, `is { … }`,
+  `≡ₚ … except/on […]`, and `@[app_unexpander]` pretty-printers.
 -/

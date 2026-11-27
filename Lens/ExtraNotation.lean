@@ -108,29 +108,13 @@ scoped syntax:50 term:51 " ≡ₚ " term:51 " except " "[" term,* "]" : term
 
 /-- `st is { st' with l₁ := v₁, l₂ over f₂ except e₁, e₂ }`: `st` agrees with the updated state
 `{ₗ st' with l₁ := v₁, l₂ over f₂}` everywhere except on `e₁, e₂`. -/
-scoped syntax:50 term:51 " is " "{" term " with " lensUpdate,+ " except " term,+ "}" : term
+scoped syntax:50 term:51 " is " "{" term " with " lensUpdate,+ " except " term,* "}" : term
 
 /-- `st is { st' with l₁ := v₁, l₂ over f₂ }`: `st` equals `{ₗ st' with l₁ := v₁, l₂ over f₂}`. -/
 scoped syntax:50 term:51 " is " "{" term " with " lensUpdate,+ "}" : term
 
 /-- `st is { st' except e₁, e₂ }`: `st` agrees with `st'` everywhere except on `e₁, e₂`. -/
-scoped syntax:50 term:51 " is " "{" term " except " term,+ "}" : term
-
-macro_rules
-  | `($s':term ≡ₚ $s:term on [$gs:term,*]) => do
-    let items ← gs.getElems.mapM fun g => `(Optic.ToAnyGetter.toAnyGetter $g)
-    `(Optic.EqOnAll [$items,*] $s' $s)
-  | `($s':term ≡ₚ $s:term except []) =>
-    `(Optic.ReflTransGen (Optic.Modifies Optic.Lens.unit.{_, 0}) $s' $s)
-  | `($s':term ≡ₚ $s:term except [$l:term]) =>
-    `(Optic.ReflTransGen (Optic.Modifies $l) $s' $s)
-  | `($s':term ≡ₚ $s:term except [$l:term, $ls:term,*]) => do
-    let elems := #[l] ++ ls.getElems
-    let mut prod := elems[elems.size - 1]!
-    for i in [1:elems.size] do
-      let idx := elems.size - 1 - i
-      prod ← `(Optic.Lens.prod $(elems[idx]!) $prod)
-    `(Optic.ReflTransGen (Optic.Modifies $prod) $s' $s)
+scoped syntax:50 term:51 " is " "{" term " except " term,* "}" : term
 
 end ProdNotation
 
@@ -149,47 +133,74 @@ open scoped Optic.Notation Optic.ProdNotation
 /-- Resolve a dot-separated field path `a.b.c` starting from source type `sTy` by looking up
 `<TypeName>.Lenses.<seg>` at each step and composing with `Optic.Lens.comp`. Returns `none` if
 `stx` is not an identifier or any segment is not found in `<TypeName>.Lenses`. -/
-private def resolveLensPath? (sTy : Expr) (stx : Term) : TermElabM (Option Expr) := do
+def resolveLensPath? (sTy : Expr) (stx : Term) : TermElabM (Option Expr) := do
   unless stx.raw.isIdent do return none
-  let segs := stx.raw.getId.components
+  let segs := stx.raw.getId.eraseMacroScopes.components
   if segs.isEmpty then return none
-  let saved ← saveState
-  -- NOTE: We could just use `commitWhenSomeNoEx?` here, no?
-  try
+  commitWhenSomeNoEx? do
     let mut curTy ← instantiateMVars sTy
     let mut acc : Option Expr := none
     for seg in segs do
       let curTyWhnf ← whnf curTy
-      let .const typeName _ := curTyWhnf.getAppFn | saved.restore; return none
+      let .const typeName _ := curTyWhnf.getAppFn | return none
       let lensName := typeName ++ `Lenses ++ seg
       unless (← getEnv).contains lensName do
-        saved.restore
         return none
       let stepLens ← mkAppOptM lensName (curTyWhnf.getAppArgs.map some)
       let stepTy ← whnf (← inferType stepLens)
       unless stepTy.isAppOfArity ``Optic.Lens 2 do
-        saved.restore
         return none
       acc ← match acc with
         | none => pure (some stepLens)
         | some prev => pure (some (← mkAppM ``Optic.Lens.comp #[prev, stepLens]))
       curTy ← instantiateMVars (stepTy.getArg! 1)
     return acc
-  catch _ =>
-    saved.restore
-    return none
+
+/-- Run `x` speculatively in `TermElabM`, rolling back all state (including logged error messages)
+if `x` throws or logs any new errors. -/
+def tryTermElab? (x : TermElabM Expr) : TermElabM (Option Expr) :=
+  commitWhenSomeNoEx? do
+    let numMsgs := (← getThe Core.State).messages.toList.length
+    let e ← withoutErrToSorry <| Term.withSynthesize x
+    let newMsgs := (← getThe Core.State).messages.toList.drop numMsgs
+    if newMsgs.any (·.severity == .error) then
+      return none
+    return some e
+
+/-- Build `Optic.Lens.unit.{u, 0} (s := sTy)`. -/
+def mkUnitLens (sTy : Expr) : MetaM Expr := do
+  let u ← getDecLevel sTy
+  return mkApp (mkConst ``Optic.Lens.unit [u, Level.zero]) sTy
+
+/-- Elaborate a lens term for source type `sTy`, trying dot-path resolution via `resolveLensPath?`
+first, then `Optic.Lens sTy ?a` (inferring polymorphic lenses such as `Lens.atKey`), and then
+`Optic.Iso sTy ?a` (lifted via `Optic.Iso.toLens`). -/
+def elabLensOrPath (sTy : Expr) (e : Term) : TermElabM Expr := do
+  if let some lensE ← resolveLensPath? sTy e then
+    return lensE
+  let v ← mkFreshLevelMVar
+  let a ← mkFreshExprMVar (mkSort (.succ v))
+  let expectedLensTy ← mkAppM ``Optic.Lens #[sTy, a]
+  if let some lensE ← tryTermElab? (elabTermEnsuringType e expectedLensTy) then
+    return lensE
+  let v' ← mkFreshLevelMVar
+  let a' ← mkFreshExprMVar (mkSort (.succ v'))
+  let expectedIsoTy ← mkAppM ``Optic.Iso #[sTy, a']
+  if let some isoE ← tryTermElab? (elabTermEnsuringType e expectedIsoTy) then
+    return ← mkAppM ``Optic.Iso.toLens #[isoE]
+  elabTermEnsuringType e expectedLensTy
 
 /-- Elaborate a single `lensUpdate` (`l := v` or `l over f`) applied to state `acc : sTy`. -/
 private def elabLensUpdate (sTy : Expr) (acc : Expr) (u : TSyntax `lensUpdate) : TermElabM Expr := do
   match u with
   | `(lensUpdate| $l:term := $v:term) => do
-    let lensE ← (← resolveLensPath? sTy l).getDM (elabTerm l none)
+    let lensE ← elabLensOrPath sTy l
     let lensTy ← whnf (← inferType lensE)
     let valTy := if lensTy.isAppOfArity ``Optic.Lens 2 then some (lensTy.getArg! 1) else none
     let valE ← elabTerm v valTy
     mkAppM ``Optic.Lens.set #[lensE, acc, valE]
   | `(lensUpdate| $l:term over $f:term) => do
-    let lensE ← (← resolveLensPath? sTy l).getDM (elabTerm l none)
+    let lensE ← elabLensOrPath sTy l
     let lensTy ← whnf (← inferType lensE)
     let fnTy ← if lensTy.isAppOfArity ``Optic.Lens 2 then
         let a := lensTy.getArg! 1
@@ -199,11 +210,12 @@ private def elabLensUpdate (sTy : Expr) (acc : Expr) (u : TSyntax `lensUpdate) :
     mkAppM ``Optic.Lens.over #[lensE, fnE, acc]
   | _ => throwUnsupportedSyntax
 
-/-- Elaborate a non-empty list of `except` entries as a right-associated product `Lens sTy _`,
-trying dot-path lens resolution first on each entry. -/
-private def elabExceptProdLens (sTy : Expr) (es : Array Term) : TermElabM Expr := do
-  let lenses ← es.mapM fun e => do
-    (← resolveLensPath? sTy e).getDM (elabTerm e none)
+/-- Elaborate a list of `except` entries as a right-associated product `Lens sTy _` (or
+`Optic.Lens.unit.{u, 0}` when empty), trying dot-path lens resolution first on each entry. -/
+def elabExceptProdLens (sTy : Expr) (es : Array Term) : TermElabM Expr := do
+  if es.isEmpty then
+    return ← mkUnitLens sTy
+  let lenses ← es.mapM (elabLensOrPath sTy)
   let mut prod := lenses[lenses.size - 1]!
   for i in [1:lenses.size] do
     let idx := lenses.size - 1 - i
@@ -227,8 +239,9 @@ elab_rules : term
     return acc
   | `($st:term is { $st':term with $us:lensUpdate,* except $es:term,* }) => do
     let stE ← elabTerm st none
+    let sTy' ← instantiateMVars (← inferType stE)
+    let mut updated ← elabTermEnsuringType st' sTy'
     let sTy ← instantiateMVars (← inferType stE)
-    let mut updated ← elabTermEnsuringType st' sTy
     for u in us.getElems do
       updated ← elabLensUpdate sTy updated u
     let prodLens ← elabExceptProdLens sTy es.getElems
@@ -236,15 +249,17 @@ elab_rules : term
     mkAppM ``Optic.ReflTransGen #[modRel, stE, updated]
   | `($st:term is { $st':term with $us:lensUpdate,* }) => do
     let stE ← elabTerm st none
+    let sTy' ← instantiateMVars (← inferType stE)
+    let mut updated ← elabTermEnsuringType st' sTy'
     let sTy ← instantiateMVars (← inferType stE)
-    let mut updated ← elabTermEnsuringType st' sTy
     for u in us.getElems do
       updated ← elabLensUpdate sTy updated u
     mkEq stE updated
   | `($st:term is { $st':term except $es:term,* }) => do
     let stE ← elabTerm st none
+    let sTy' ← instantiateMVars (← inferType stE)
+    let st'E ← elabTermEnsuringType st' sTy'
     let sTy ← instantiateMVars (← inferType stE)
-    let st'E ← elabTermEnsuringType st' sTy
     let prodLens ← elabExceptProdLens sTy es.getElems
     let modRel ← mkAppM ``Optic.Modifies #[prodLens]
     mkAppM ``Optic.ReflTransGen #[modRel, stE, st'E]
