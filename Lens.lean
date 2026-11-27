@@ -9,6 +9,7 @@ public import Lens.Derive
 public import Lens.Tactics.Disjoint
 public import Lens.Tactics.Frame
 public import Lens.Tactics.Eqs
+public import Lens.Tactics.Simp
 public import Lens.ExtraNotation
 
 /-!
