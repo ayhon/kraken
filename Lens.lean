@@ -6,6 +6,7 @@ public import Lens.Frame
 public import Lens.ProdFrame
 public import Lens.Family
 public import Lens.Derive
+public import Lens.Tactics.Disjoint
 public import Lens.ExtraNotation
 
 /-!

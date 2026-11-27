@@ -240,7 +240,7 @@ instance : LawfulLens high8 where
   set_get x := by simp only [high8]; bv_decide
   set_set x v₁ v₂ := by simp only [high8]; bv_decide
 
-theorem disj_low8_high8 : Disjoint low8 high8 := by
+@[lens_disjoint] theorem disj_low8_high8 : Disjoint low8 high8 := by
   intro x v₁ v₂; simp only [low8, high8]; bv_decide
 
 abbrev stX0Low8 : Lens (MiniState MiniMachineData) (BitVec 8) :=
@@ -249,12 +249,55 @@ abbrev stX0Low8 : Lens (MiniState MiniMachineData) (BitVec 8) :=
 abbrev stX0High8 : Lens (MiniState MiniMachineData) (BitVec 8) :=
   (stX0 ∘ₗ Iso.uint64BitVec.toLens) ∘ₗ high8
 
--- Writing `al` preserves `ah`:
+-- Writing `al` preserves `ah` — proved automatically via `@[lens_disjoint]` + prefix descent!
+example : Disjoint stX0Low8 stX0High8 := by lens_disjoint
+
 example (st : MiniState MiniMachineData) (v : BitVec 8) :
-    ((st & stX0Low8 .~ v) ^. stX0High8) = (st ^. stX0High8) := by
-  have hdisj : Disjoint stX0Low8 stX0High8 :=
-    Disjoint.comp_same (stX0 ∘ₗ Iso.uint64BitVec.toLens) disj_low8_high8
-  exact Modifies.preserves_disjoint hdisj (Modifies.set _ _ _)
+    ((st & stX0Low8 .~ v) ^. stX0High8) = (st ^. stX0High8) :=
+  Modifies.preserves_disjoint (by lens_disjoint) (Modifies.set _ _ _)
+
+/-! ### 5b. Path-Aware `lens_disjoint` & `lens_indep` Tests -/
+
+-- Deep nested disjointness across diverging fields without unfolding untouched sub-structures:
+example : Disjoint stX0 stZ := by lens_disjoint
+example : Disjoint stX0 stPc := by lens_disjoint
+example : Disjoint (stX0 ×ₗ stX1) (stZ ×ₗ stPc) := by lens_disjoint
+
+-- Symbolic `atKey` disjointness via local hypothesis, `decide`, and `omega`:
+example (a₁ a₂ : BitVec 64) (hne : a₁ ≠ a₂) :
+    Disjoint (stDmem ∘ₗ Lens.atKey a₁) (stDmem ∘ₗ Lens.atKey a₂) := by
+  lens_disjoint
+
+example (a₁ a₂ : BitVec 64) (hne : a₂ ≠ a₁) :
+    Disjoint (stDmem ∘ₗ Lens.atKey a₁) (stDmem ∘ₗ Lens.atKey a₂) := by
+  lens_disjoint
+
+example (n : Nat) :
+    Disjoint (Lens.atKey (v := UInt8) n) (Lens.atKey (v := UInt8) (n + 1)) := by
+  lens_disjoint
+
+example : Disjoint (stDmem ∘ₗ Lens.atKey (0 : BitVec 64)) (stDmem ∘ₗ Lens.atKey (8 : BitVec 64)) := by
+  lens_disjoint
+
+-- Composite derived views on nested state (congruence-first + view unfolding):
+def stateViewA (st : MiniState MiniMachineData) : Nat :=
+  st.data.regs.x0.toNat + st.data.regs.x1.toNat
+
+def stateViewMem (addr : BitVec 64) (st : MiniState MiniMachineData) : Nat :=
+  st.data.regs.sp.toNat + (st.data.dmem addr).toNat
+
+example : Independent (stPc ×ₗ stZ ×ₗ (stRegs ∘ₗ MiniRegs.Lenses.x3)) (Getter.of stateViewA) := by
+  lens_indep
+
+example (a₁ a₂ : BitVec 64) (hne : a₁ ≠ a₂) :
+    Independent ((stDmem ∘ₗ Lens.atKey a₁) ×ₗ stX0) (Getter.of (stateViewMem a₂)) := by
+  lens_indep
+
+-- Abstract polymorphic lenses with local `Disjoint` hypotheses:
+example {S A B C : Type} (l₁ : Lens S A) (l₂ : Lens S B) (l₃ : Lens S C)
+    [LawfulLens l₃] (h₁ : Disjoint l₁ l₃) (h₂ : Disjoint l₃ l₂) :
+    Independent (l₁ ×ₗ l₂) l₃.toGetter := by
+  lens_indep
 
 -- Overlapping writes `[stX0Low8, stX0]` absorb cleanly into `[stX0]` without `Disjoint`:
 example (st' st : MiniState MiniMachineData)
